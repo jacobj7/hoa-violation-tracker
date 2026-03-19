@@ -1,17 +1,14 @@
 import { NextResponse } from "next/server";
 
-export const dynamic = "force-dynamic";
+export async function POST() {
+  const response = NextResponse.json({ message: "Logged out successfully" });
 
-export async function POST(): Promise<NextResponse> {
-  const response = NextResponse.json({ success: true }, { status: 200 });
-
-  response.cookies.set("auth-token", "", {
+  response.cookies.set("auth_token", "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
+    sameSite: "strict",
     maxAge: 0,
-    expires: new Date(0),
+    path: "/",
   });
 
   return response;

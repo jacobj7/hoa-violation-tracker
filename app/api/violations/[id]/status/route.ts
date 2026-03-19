@@ -1,15 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { z } from "zod";
-import { Pool } from "pg";
+import { query } from "@/lib/db";
 
-export const dynamic = "force-dynamic";
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-const statusSchema = z.object({
+const statusUpdateSchema = z.object({
   status: z.enum(["pending", "under_review", "resolved", "dismissed"]),
   notes: z.string().optional(),
 });
@@ -18,21 +13,18 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
 
   if (!session || !session.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const userRole = (session.user as { role?: string }).role;
-  if (userRole !== "manager" && userRole !== "admin") {
-    return NextResponse.json(
-      { error: "Forbidden: Manager role required" },
-      { status: 403 },
-    );
+  if (session.user.role !== "admin" && session.user.role !== "moderator") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const violationId = params.id;
+
   if (!violationId || isNaN(Number(violationId))) {
     return NextResponse.json(
       { error: "Invalid violation ID" },
@@ -47,83 +39,57 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const parseResult = statusSchema.safeParse(body);
+  const parseResult = statusUpdateSchema.safeParse(body);
   if (!parseResult.success) {
     return NextResponse.json(
       { error: "Validation failed", details: parseResult.error.flatten() },
-      { status: 422 },
+      { status: 400 },
     );
   }
 
   const { status, notes } = parseResult.data;
-  const userId = (session.user as { id?: string }).id ?? session.user.email;
 
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-
-    const violationResult = await client.query(
-      "SELECT id, status FROM violations WHERE id = $1",
+    const existingViolation = await query(
+      "SELECT id FROM violations WHERE id = $1",
       [violationId],
     );
 
-    if (violationResult.rowCount === 0) {
-      await client.query("ROLLBACK");
+    if (existingViolation.rows.length === 0) {
       return NextResponse.json(
         { error: "Violation not found" },
         { status: 404 },
       );
     }
 
-    const previousStatus = violationResult.rows[0].status;
-
-    const updateResult = await client.query(
-      `UPDATE violations
-       SET status = $1, updated_at = NOW()
-       WHERE id = $2
-       RETURNING id, status, updated_at`,
-      [status, violationId],
+    const updatedViolation = await query(
+      `UPDATE violations 
+       SET status = $1, 
+           notes = COALESCE($2, notes), 
+           updated_at = NOW(),
+           reviewed_by = $3,
+           reviewed_at = NOW()
+       WHERE id = $4
+       RETURNING id, status, notes, updated_at, reviewed_by, reviewed_at`,
+      [status, notes ?? null, session.user.id, violationId],
     );
 
-    await client.query(
-      `INSERT INTO audit_log (
-        entity_type,
-        entity_id,
-        action,
-        performed_by,
-        previous_value,
-        new_value,
-        notes,
-        created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-      [
-        "violation",
-        violationId,
-        "status_update",
-        userId,
-        previousStatus,
-        status,
-        notes ?? null,
-      ],
+    await query(
+      `INSERT INTO violation_audit_log (violation_id, changed_by, old_status, new_status, notes, created_at)
+       SELECT $1, $2, v_old.status, $3, $4, NOW()
+       FROM violations v_old WHERE v_old.id = $1`,
+      [violationId, session.user.id, status, notes ?? null],
     );
 
-    await client.query("COMMIT");
-
-    return NextResponse.json(
-      {
-        message: "Violation status updated successfully",
-        violation: updateResult.rows[0],
-      },
-      { status: 200 },
-    );
+    return NextResponse.json({
+      message: "Violation status updated successfully",
+      violation: updatedViolation.rows[0],
+    });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("Error updating violation status:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
     );
-  } finally {
-    client.release();
   }
 }
