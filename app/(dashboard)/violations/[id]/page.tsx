@@ -1,106 +1,104 @@
 import { notFound } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { pool } from "@/lib/db";
-import ViolationDetail from "./ViolationDetail";
-
-interface ViolationRow {
-  id: string;
-  title: string;
-  description: string;
-  severity: string;
-  status: string;
-  created_at: Date;
-  updated_at: Date;
-  user_id: string;
-  location: string | null;
-  evidence_url: string | null;
-  assigned_to: string | null;
-  resolution_notes: string | null;
-  reporter_name: string | null;
-  reporter_email: string | null;
-}
+import { db } from "@/lib/db";
+import ViolationDetailClient from "./ViolationDetailClient";
 
 interface PageProps {
-  params: { id: string };
+  params: {
+    id: string;
+  };
+}
+
+async function getViolation(id: string, userId: string) {
+  const result = await db.query(
+    `SELECT 
+      v.id,
+      v.title,
+      v.description,
+      v.severity,
+      v.status,
+      v.location,
+      v.detected_at,
+      v.resolved_at,
+      v.created_at,
+      v.updated_at,
+      v.user_id,
+      v.metadata,
+      u.name as reporter_name,
+      u.email as reporter_email
+    FROM violations v
+    LEFT JOIN users u ON v.user_id = u.id
+    WHERE v.id = $1 AND v.user_id = $2`,
+    [id, userId],
+  );
+
+  return result.rows[0] || null;
+}
+
+async function getViolationComments(violationId: string) {
+  const result = await db.query(
+    `SELECT 
+      c.id,
+      c.content,
+      c.created_at,
+      c.updated_at,
+      u.name as author_name,
+      u.email as author_email
+    FROM violation_comments c
+    LEFT JOIN users u ON c.user_id = u.id
+    WHERE c.violation_id = $1
+    ORDER BY c.created_at ASC`,
+    [violationId],
+  );
+
+  return result.rows;
+}
+
+async function getViolationHistory(violationId: string) {
+  const result = await db.query(
+    `SELECT 
+      h.id,
+      h.action,
+      h.old_value,
+      h.new_value,
+      h.created_at,
+      u.name as actor_name,
+      u.email as actor_email
+    FROM violation_history h
+    LEFT JOIN users u ON h.user_id = u.id
+    WHERE h.violation_id = $1
+    ORDER BY h.created_at DESC`,
+    [violationId],
+  );
+
+  return result.rows;
 }
 
 export default async function ViolationDetailPage({ params }: PageProps) {
   const session = await getServerSession(authOptions);
 
-  if (!session) {
+  if (!session?.user?.id) {
     notFound();
   }
 
-  const { id } = params;
-
-  let violation: ViolationRow | null = null;
-
-  try {
-    const client = await pool.connect();
-    try {
-      const result = await client.query<ViolationRow>(
-        `SELECT
-          v.id,
-          v.title,
-          v.description,
-          v.severity,
-          v.status,
-          v.created_at,
-          v.updated_at,
-          v.user_id,
-          v.location,
-          v.evidence_url,
-          v.assigned_to,
-          v.resolution_notes,
-          u.name AS reporter_name,
-          u.email AS reporter_email
-        FROM violations v
-        LEFT JOIN users u ON v.user_id = u.id
-        WHERE v.id = $1`,
-        [id],
-      );
-
-      if (result.rows.length === 0) {
-        notFound();
-      }
-
-      violation = result.rows[0];
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error("Error fetching violation:", error);
-    notFound();
-  }
+  const violation = await getViolation(params.id, session.user.id);
 
   if (!violation) {
     notFound();
   }
 
-  const serializedViolation = {
-    id: violation.id,
-    title: violation.title,
-    description: violation.description,
-    severity: violation.severity,
-    status: violation.status,
-    createdAt: violation.created_at.toISOString(),
-    updatedAt: violation.updated_at.toISOString(),
-    userId: violation.user_id,
-    location: violation.location,
-    evidenceUrl: violation.evidence_url,
-    assignedTo: violation.assigned_to,
-    resolutionNotes: violation.resolution_notes,
-    reporterName: violation.reporter_name,
-    reporterEmail: violation.reporter_email,
-  };
+  const [comments, history] = await Promise.all([
+    getViolationComments(params.id),
+    getViolationHistory(params.id),
+  ]);
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <ViolationDetail
-        violation={serializedViolation}
-        currentUserId={session.user?.id as string}
-      />
-    </div>
+    <ViolationDetailClient
+      violation={violation}
+      comments={comments}
+      history={history}
+      currentUserId={session.user.id}
+    />
   );
 }

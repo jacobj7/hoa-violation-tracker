@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
 import { z } from "zod";
-import { query } from "@/lib/db";
+import { Pool } from "pg";
 
 export const dynamic = "force-dynamic";
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
 const createViolationSchema = z.object({
-  title: z.string().min(1).max(255),
-  description: z.string().min(1),
+  property_id: z.number().int().positive(),
+  category_id: z.number().int().positive(),
+  description: z.string().min(1).max(5000),
   status: z
     .enum(["open", "in_progress", "resolved", "closed"])
     .optional()
@@ -15,54 +21,79 @@ const createViolationSchema = z.object({
     .enum(["low", "medium", "high", "critical"])
     .optional()
     .default("medium"),
-  reported_by: z.string().min(1).max(255).optional(),
-  location: z.string().max(500).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  reported_date: z.string().optional(),
+  due_date: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
 });
-
-const statusFilterSchema = z
-  .enum(["open", "in_progress", "resolved", "closed"])
-  .optional();
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await getServerSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
-    const statusParam = searchParams.get("status") ?? undefined;
+    const status = searchParams.get("status");
+    const property_id = searchParams.get("property_id");
 
-    const statusParse = statusFilterSchema.safeParse(statusParam);
-    if (!statusParse.success) {
-      return NextResponse.json(
-        {
-          error: "Invalid status filter",
-          details: statusParse.error.flatten(),
-        },
-        { status: 400 },
-      );
-    }
+    const conditions: string[] = [];
+    const values: (string | number)[] = [];
+    let paramIndex = 1;
 
-    const status = statusParse.data;
-
-    let result;
     if (status) {
-      result = await query(
-        "SELECT * FROM violations WHERE status = $1 ORDER BY created_at DESC",
-        [status],
-      );
-    } else {
-      result = await query(
-        "SELECT * FROM violations ORDER BY created_at DESC",
-        [],
-      );
+      conditions.push(`v.status = $${paramIndex}`);
+      values.push(status);
+      paramIndex++;
     }
 
-    return NextResponse.json({
-      violations: result.rows,
-      count: result.rowCount,
-    });
+    if (property_id) {
+      const parsedPropertyId = parseInt(property_id, 10);
+      if (!isNaN(parsedPropertyId)) {
+        conditions.push(`v.property_id = $${paramIndex}`);
+        values.push(parsedPropertyId);
+        paramIndex++;
+      }
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const query = `
+      SELECT
+        v.id,
+        v.property_id,
+        v.category_id,
+        v.description,
+        v.status,
+        v.severity,
+        v.reported_date,
+        v.due_date,
+        v.notes,
+        v.created_at,
+        v.updated_at,
+        p.name AS property_name,
+        p.address AS property_address,
+        c.name AS category_name,
+        c.code AS category_code
+      FROM violations v
+      LEFT JOIN properties p ON v.property_id = p.id
+      LEFT JOIN violation_categories c ON v.category_id = c.id
+      ${whereClause}
+      ORDER BY v.created_at DESC
+    `;
+
+    const client = await pool.connect();
+    try {
+      const result = await client.query(query, values);
+      return NextResponse.json({ violations: result.rows }, { status: 200 });
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error("GET /api/violations error:", error);
     return NextResponse.json(
-      { error: "Failed to fetch violations" },
+      { error: "Internal server error" },
       { status: 500 },
     );
   }
@@ -70,6 +101,11 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     let body: unknown;
     try {
       body = await request.json();
@@ -77,46 +113,108 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const parsed = createViolationSchema.safeParse(body);
-    if (!parsed.success) {
+    const parseResult = createViolationSchema.safeParse(body);
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Validation failed", details: parsed.error.flatten() },
+        { error: "Validation failed", details: parseResult.error.flatten() },
         { status: 422 },
       );
     }
 
     const {
-      title,
+      property_id,
+      category_id,
       description,
       status,
       severity,
-      reported_by,
-      location,
-      metadata,
-    } = parsed.data;
+      reported_date,
+      due_date,
+      notes,
+    } = parseResult.data;
 
-    const result = await query(
-      `INSERT INTO violations (title, description, status, severity, reported_by, location, metadata, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-       RETURNING *`,
-      [
-        title,
+    const client = await pool.connect();
+    try {
+      const insertQuery = `
+        INSERT INTO violations (
+          property_id,
+          category_id,
+          description,
+          status,
+          severity,
+          reported_date,
+          due_date,
+          notes,
+          created_at,
+          updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8,
+          NOW(), NOW()
+        )
+        RETURNING
+          id,
+          property_id,
+          category_id,
+          description,
+          status,
+          severity,
+          reported_date,
+          due_date,
+          notes,
+          created_at,
+          updated_at
+      `;
+
+      const values = [
+        property_id,
+        category_id,
         description,
         status,
         severity,
-        reported_by ?? null,
-        location ?? null,
-        metadata ? JSON.stringify(metadata) : null,
-      ],
-    );
+        reported_date ?? new Date().toISOString().split("T")[0],
+        due_date ?? null,
+        notes ?? null,
+      ];
 
-    const violation = result.rows[0];
+      const result = await client.query(insertQuery, values);
+      const violation = result.rows[0];
 
-    return NextResponse.json({ violation }, { status: 201 });
+      const enrichedQuery = `
+        SELECT
+          v.id,
+          v.property_id,
+          v.category_id,
+          v.description,
+          v.status,
+          v.severity,
+          v.reported_date,
+          v.due_date,
+          v.notes,
+          v.created_at,
+          v.updated_at,
+          p.name AS property_name,
+          p.address AS property_address,
+          c.name AS category_name,
+          c.code AS category_code
+        FROM violations v
+        LEFT JOIN properties p ON v.property_id = p.id
+        LEFT JOIN violation_categories c ON v.category_id = c.id
+        WHERE v.id = $1
+      `;
+
+      const enrichedResult = await client.query(enrichedQuery, [violation.id]);
+
+      return NextResponse.json(
+        { violation: enrichedResult.rows[0] },
+        { status: 201 },
+      );
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error("POST /api/violations error:", error);
     return NextResponse.json(
-      { error: "Failed to create violation" },
+      { error: "Internal server error" },
       { status: 500 },
     );
   }

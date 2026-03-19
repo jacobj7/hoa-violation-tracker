@@ -9,11 +9,7 @@ export const metadata = {
 export default function PropertiesPage() {
   return (
     <Suspense
-      fallback={
-        <div className="flex items-center justify-center h-64">
-          Loading properties...
-        </div>
-      }
+      fallback={<div className="p-8 text-center">Loading properties...</div>}
     >
       <PropertiesClient />
     </Suspense>
