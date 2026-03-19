@@ -1,13 +1,7 @@
 import { put } from "@vercel/blob";
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 
 export const dynamic = "force-dynamic";
-
-const uploadSchema = z.object({
-  filename: z.string().min(1),
-  contentType: z.string().min(1),
-});
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,18 +11,6 @@ export async function POST(request: NextRequest) {
     if (!file || !(file instanceof File)) {
       return NextResponse.json(
         { error: "No file provided or invalid file" },
-        { status: 400 },
-      );
-    }
-
-    const validation = uploadSchema.safeParse({
-      filename: file.name,
-      contentType: file.type,
-    });
-
-    if (!validation.success) {
-      return NextResponse.json(
-        { error: "Invalid file metadata", details: validation.error.flatten() },
         { status: 400 },
       );
     }
@@ -56,10 +38,10 @@ export async function POST(request: NextRequest) {
     }
 
     const timestamp = Date.now();
-    const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const blobFilename = `uploads/${timestamp}-${sanitizedFilename}`;
+    const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const blobPath = `uploads/${timestamp}-${sanitizedFileName}`;
 
-    const blob = await put(blobFilename, file, {
+    const blob = await put(blobPath, file, {
       access: "public",
       contentType: file.type,
     });
@@ -76,11 +58,14 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof Error) {
       return NextResponse.json(
-        { error: "Upload failed", message: error.message },
+        { error: `Upload failed: ${error.message}` },
         { status: 500 },
       );
     }
 
-    return NextResponse.json({ error: "Upload failed" }, { status: 500 });
+    return NextResponse.json(
+      { error: "An unexpected error occurred during upload" },
+      { status: 500 },
+    );
   }
 }

@@ -1,16 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { pool } from "@/lib/db";
+import { db } from "@/lib/db";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
 const patchSchema = z.object({
-  status: z.enum(["open", "in_progress", "resolved", "closed"]).optional(),
-  notes: z.string().optional(),
-  resolved_at: z.string().datetime().optional().nullable(),
-  assigned_to: z.string().optional().nullable(),
+  status: z
+    .enum(["open", "pending", "resolved", "closed", "appealed"])
+    .optional(),
+  severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+  description: z.string().min(1).optional(),
+  resolution_notes: z.string().optional(),
+  assigned_to: z.string().uuid().nullable().optional(),
+  due_date: z.string().datetime().nullable().optional(),
+  fine_amount: z.number().nonnegative().nullable().optional(),
+  fine_paid: z.boolean().optional(),
+  location: z.string().optional(),
+  violation_type: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 export async function GET(
@@ -19,82 +28,73 @@ export async function GET(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
+    if (!session?.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = params;
 
-    const result = await pool.query(
-      `SELECT
-        v.id,
-        v.title,
-        v.description,
-        v.status,
-        v.severity,
-        v.notes,
-        v.created_at,
-        v.updated_at,
-        v.resolved_at,
-        v.assigned_to,
-        p.id AS property_id,
-        p.name AS property_name,
-        p.address AS property_address,
-        p.city AS property_city,
-        p.state AS property_state,
-        p.zip AS property_zip,
-        c.id AS category_id,
-        c.name AS category_name,
-        c.description AS category_description,
-        c.color AS category_color
+    if (!id || typeof id !== "string") {
+      return NextResponse.json(
+        { error: "Invalid violation ID" },
+        { status: 400 },
+      );
+    }
+
+    const violationResult = await db.query(
+      `SELECT 
+        v.*,
+        u.name AS assigned_to_name,
+        u.email AS assigned_to_email,
+        reporter.name AS reported_by_name,
+        reporter.email AS reported_by_email
       FROM violations v
-      LEFT JOIN properties p ON v.property_id = p.id
-      LEFT JOIN violation_categories c ON v.category_id = c.id
+      LEFT JOIN users u ON v.assigned_to = u.id
+      LEFT JOIN users reporter ON v.reported_by = reporter.id
       WHERE v.id = $1`,
       [id],
     );
 
-    if (result.rows.length === 0) {
+    if (violationResult.rows.length === 0) {
       return NextResponse.json(
         { error: "Violation not found" },
         { status: 404 },
       );
     }
 
-    const row = result.rows[0];
+    const violation = violationResult.rows[0];
 
-    const violation = {
-      id: row.id,
-      title: row.title,
-      description: row.description,
-      status: row.status,
-      severity: row.severity,
-      notes: row.notes,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      resolved_at: row.resolved_at,
-      assigned_to: row.assigned_to,
-      property: row.property_id
-        ? {
-            id: row.property_id,
-            name: row.property_name,
-            address: row.property_address,
-            city: row.property_city,
-            state: row.property_state,
-            zip: row.property_zip,
-          }
-        : null,
-      category: row.category_id
-        ? {
-            id: row.category_id,
-            name: row.category_name,
-            description: row.category_description,
-            color: row.category_color,
-          }
-        : null,
-    };
+    const noticesResult = await db.query(
+      `SELECT 
+        n.*,
+        sender.name AS sent_by_name,
+        sender.email AS sent_by_email
+      FROM notices n
+      LEFT JOIN users sender ON n.sent_by = sender.id
+      WHERE n.violation_id = $1
+      ORDER BY n.created_at DESC`,
+      [id],
+    );
 
-    return NextResponse.json({ violation });
+    const auditResult = await db.query(
+      `SELECT 
+        ae.*,
+        u.name AS actor_name,
+        u.email AS actor_email
+      FROM audit_events ae
+      LEFT JOIN users u ON ae.actor_id = u.id
+      WHERE ae.entity_type = 'violation' AND ae.entity_id = $1
+      ORDER BY ae.created_at DESC`,
+      [id],
+    );
+
+    return NextResponse.json({
+      violation: {
+        ...violation,
+        notices: noticesResult.rows,
+        audit_events: auditResult.rows,
+      },
+    });
   } catch (error) {
     console.error("GET /api/violations/[id] error:", error);
     return NextResponse.json(
@@ -110,87 +110,115 @@ export async function PATCH(
 ) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session) {
+    if (!session?.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = params;
 
-    const body = await request.json();
-    const parsed = patchSchema.safeParse(body);
-
-    if (!parsed.success) {
+    if (!id || typeof id !== "string") {
       return NextResponse.json(
-        { error: "Invalid request body", details: parsed.error.flatten() },
+        { error: "Invalid violation ID" },
         { status: 400 },
       );
     }
 
-    const data = parsed.data;
-
-    const setClauses: string[] = [];
-    const values: unknown[] = [];
-    let paramIndex = 1;
-
-    if (data.status !== undefined) {
-      setClauses.push(`status = $${paramIndex++}`);
-      values.push(data.status);
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    if (data.notes !== undefined) {
-      setClauses.push(`notes = $${paramIndex++}`);
-      values.push(data.notes);
+    const parseResult = patchSchema.safeParse(body);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { error: "Validation failed", details: parseResult.error.flatten() },
+        { status: 422 },
+      );
     }
 
-    if ("resolved_at" in data) {
-      setClauses.push(`resolved_at = $${paramIndex++}`);
-      values.push(data.resolved_at ?? null);
-    }
+    const updates = parseResult.data;
 
-    if ("assigned_to" in data) {
-      setClauses.push(`assigned_to = $${paramIndex++}`);
-      values.push(data.assigned_to ?? null);
-    }
-
-    if (setClauses.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return NextResponse.json(
         { error: "No fields to update" },
         { status: 400 },
       );
     }
 
-    setClauses.push(`updated_at = NOW()`);
-    values.push(id);
+    const existingResult = await db.query(
+      "SELECT id FROM violations WHERE id = $1",
+      [id],
+    );
 
-    const query = `
-      UPDATE violations
-      SET ${setClauses.join(", ")}
-      WHERE id = $${paramIndex}
-      RETURNING
-        id,
-        title,
-        description,
-        status,
-        severity,
-        notes,
-        created_at,
-        updated_at,
-        resolved_at,
-        assigned_to,
-        property_id,
-        category_id
-    `;
-
-    const result = await pool.query(query, values);
-
-    if (result.rows.length === 0) {
+    if (existingResult.rows.length === 0) {
       return NextResponse.json(
         { error: "Violation not found" },
         { status: 404 },
       );
     }
 
-    return NextResponse.json({ violation: result.rows[0] });
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
+
+    const fieldMap: Record<string, string> = {
+      status: "status",
+      severity: "severity",
+      description: "description",
+      resolution_notes: "resolution_notes",
+      assigned_to: "assigned_to",
+      due_date: "due_date",
+      fine_amount: "fine_amount",
+      fine_paid: "fine_paid",
+      location: "location",
+      violation_type: "violation_type",
+      metadata: "metadata",
+    };
+
+    for (const [key, dbField] of Object.entries(fieldMap)) {
+      if (key in updates) {
+        const value = updates[key as keyof typeof updates];
+        if (key === "metadata" && value !== undefined && value !== null) {
+          setClauses.push(`${dbField} = $${paramIndex}::jsonb`);
+          values.push(JSON.stringify(value));
+        } else {
+          setClauses.push(`${dbField} = $${paramIndex}`);
+          values.push(value ?? null);
+        }
+        paramIndex++;
+      }
+    }
+
+    setClauses.push(`updated_at = NOW()`);
+
+    values.push(id);
+    const updateQuery = `
+      UPDATE violations
+      SET ${setClauses.join(", ")}
+      WHERE id = $${paramIndex}
+      RETURNING *
+    `;
+
+    const updateResult = await db.query(updateQuery, values);
+    const updatedViolation = updateResult.rows[0];
+
+    try {
+      await db.query(
+        `INSERT INTO audit_events (entity_type, entity_id, actor_id, action, changes, created_at)
+         VALUES ('violation', $1, $2, 'update', $3::jsonb, NOW())`,
+        [
+          id,
+          (session.user as { id?: string }).id ?? null,
+          JSON.stringify(updates),
+        ],
+      );
+    } catch (auditError) {
+      console.error("Failed to create audit event:", auditError);
+    }
+
+    return NextResponse.json({ violation: updatedViolation });
   } catch (error) {
     console.error("PATCH /api/violations/[id] error:", error);
     return NextResponse.json(

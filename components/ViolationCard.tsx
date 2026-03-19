@@ -1,133 +1,103 @@
-import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { MapPin, Calendar, AlertTriangle } from "lucide-react";
+"use client";
 
-export type ViolationSeverity = "low" | "medium" | "high" | "critical";
-export type ViolationStatus = "open" | "in_progress" | "resolved" | "closed";
+import Link from "next/link";
+import { formatDistanceToNow } from "date-fns";
 
 export interface Violation {
   id: string | number;
-  propertyAddress: string;
+  address: string;
   category: string;
-  severity: ViolationSeverity;
-  status: ViolationStatus;
-  reportedDate: string | Date;
+  status: "open" | "closed" | "pending" | "resolved" | string;
+  date: string | Date;
+  description: string;
 }
 
 interface ViolationCardProps {
   violation: Violation;
+  className?: string;
 }
 
-const severityConfig: Record<
-  ViolationSeverity,
-  { label: string; className: string }
-> = {
-  low: {
-    label: "Low",
-    className: "bg-blue-100 text-blue-800 border-blue-200",
-  },
-  medium: {
-    label: "Medium",
-    className: "bg-yellow-100 text-yellow-800 border-yellow-200",
-  },
-  high: {
-    label: "High",
-    className: "bg-orange-100 text-orange-800 border-orange-200",
-  },
-  critical: {
-    label: "Critical",
-    className: "bg-red-100 text-red-800 border-red-200",
-  },
+const STATUS_STYLES: Record<string, string> = {
+  open: "bg-red-100 text-red-800 border border-red-200",
+  pending: "bg-yellow-100 text-yellow-800 border border-yellow-200",
+  closed: "bg-green-100 text-green-800 border border-green-200",
+  resolved: "bg-blue-100 text-blue-800 border border-blue-200",
 };
 
-const statusConfig: Record<
-  ViolationStatus,
-  { label: string; className: string }
-> = {
-  open: {
-    label: "Open",
-    className: "bg-red-100 text-red-800 border-red-200",
-  },
-  in_progress: {
-    label: "In Progress",
-    className: "bg-purple-100 text-purple-800 border-purple-200",
-  },
-  resolved: {
-    label: "Resolved",
-    className: "bg-green-100 text-green-800 border-green-200",
-  },
-  closed: {
-    label: "Closed",
-    className: "bg-gray-100 text-gray-800 border-gray-200",
-  },
-};
-
-function formatDate(date: string | Date): string {
-  const d = typeof date === "string" ? new Date(date) : date;
-  return d.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-export default function ViolationCard({ violation }: ViolationCardProps) {
-  const severity = severityConfig[violation.severity] ?? severityConfig.low;
-  const status = statusConfig[violation.status] ?? statusConfig.open;
-
+function getStatusStyle(status: string): string {
   return (
-    <Link href={`/violations/${violation.id}`} className="block group">
-      <Card className="transition-all duration-200 hover:shadow-md hover:border-gray-300 group-hover:bg-gray-50/50 cursor-pointer">
-        <CardHeader className="pb-2">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2 min-w-0">
-              <MapPin className="h-4 w-4 text-gray-500 mt-0.5 shrink-0" />
-              <span className="font-semibold text-gray-900 text-sm leading-snug truncate">
-                {violation.propertyAddress}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <AlertTriangle
-                className={`h-3.5 w-3.5 ${
-                  violation.severity === "critical"
-                    ? "text-red-500"
-                    : violation.severity === "high"
-                      ? "text-orange-500"
-                      : violation.severity === "medium"
-                        ? "text-yellow-500"
-                        : "text-blue-500"
-                }`}
-              />
-              <Badge
-                variant="outline"
-                className={`text-xs font-medium px-2 py-0.5 ${severity.className}`}
-              >
-                {severity.label}
-              </Badge>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-sm text-gray-600 font-medium truncate">
-                {violation.category}
-              </span>
-              <Badge
-                variant="outline"
-                className={`text-xs font-medium px-2 py-0.5 shrink-0 ${status.className}`}
-              >
-                {status.label}
-              </Badge>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-gray-500">
-              <Calendar className="h-3.5 w-3.5 shrink-0" />
-              <span>Reported {formatDate(violation.reportedDate)}</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
+    STATUS_STYLES[status.toLowerCase()] ??
+    "bg-gray-100 text-gray-800 border border-gray-200"
   );
 }
+
+function truncate(text: string, maxLength = 120): string {
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength).trimEnd() + "…";
+}
+
+function formatDate(date: string | Date): string {
+  try {
+    const d = typeof date === "string" ? new Date(date) : date;
+    return formatDistanceToNow(d, { addSuffix: true });
+  } catch {
+    return String(date);
+  }
+}
+
+export function ViolationCard({
+  violation,
+  className = "",
+}: ViolationCardProps) {
+  const { id, address, category, status, date, description } = violation;
+
+  return (
+    <div
+      className={`rounded-2xl border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow duration-200 p-5 flex flex-col gap-3 ${className}`}
+    >
+      {/* Header row */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide truncate">
+            {category}
+          </p>
+          <h3
+            className="text-base font-semibold text-gray-900 truncate"
+            title={address}
+          >
+            {address}
+          </h3>
+        </div>
+        <span
+          className={`shrink-0 inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${getStatusStyle(status)}`}
+        >
+          {status}
+        </span>
+      </div>
+
+      {/* Description snippet */}
+      <p className="text-sm text-gray-600 leading-relaxed">
+        {truncate(description)}
+      </p>
+
+      {/* Footer row */}
+      <div className="flex items-center justify-between mt-auto pt-1">
+        <time
+          className="text-xs text-gray-400"
+          dateTime={typeof date === "string" ? date : date.toISOString()}
+          title={typeof date === "string" ? date : date.toISOString()}
+        >
+          {formatDate(date)}
+        </time>
+        <Link
+          href={`/violations/${id}`}
+          className="text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:underline transition-colors duration-150"
+        >
+          View details →
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export default ViolationCard;

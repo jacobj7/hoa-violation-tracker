@@ -1,7 +1,7 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
-import { Pool } from "pg";
 import bcrypt from "bcryptjs";
+import { Pool } from "pg";
 import { z } from "zod";
 
 const pool = new Pool({
@@ -35,7 +35,7 @@ export const authOptions: NextAuthOptions = {
         const client = await pool.connect();
         try {
           const result = await client.query(
-            "SELECT id, email, role, password_hash FROM users WHERE email = $1",
+            "SELECT id, email, password_hash, role, community_id FROM users WHERE email = $1 LIMIT 1",
             [email],
           );
 
@@ -45,8 +45,11 @@ export const authOptions: NextAuthOptions = {
 
           const user = result.rows[0];
 
-          const isValid = await bcrypt.compare(password, user.password_hash);
-          if (!isValid) {
+          const passwordMatch = await bcrypt.compare(
+            password,
+            user.password_hash,
+          );
+          if (!passwordMatch) {
             return null;
           }
 
@@ -54,6 +57,7 @@ export const authOptions: NextAuthOptions = {
             id: String(user.id),
             email: user.email,
             role: user.role,
+            community_id: user.community_id,
           };
         } finally {
           client.release();
@@ -67,17 +71,16 @@ export const authOptions: NextAuthOptions = {
         token.id = user.id;
         token.email = user.email;
         token.role = (user as any).role;
+        token.community_id = (user as any).community_id;
       }
       return token;
     },
     async session({ session, token }) {
       if (token) {
-        session.user = {
-          ...session.user,
-          id: token.id as string,
-          email: token.email as string,
-          role: token.role as string,
-        } as any;
+        session.user.id = token.id as string;
+        session.user.email = token.email as string;
+        (session.user as any).role = token.role;
+        (session.user as any).community_id = token.community_id;
       }
       return session;
     },
