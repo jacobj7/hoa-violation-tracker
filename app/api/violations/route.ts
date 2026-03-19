@@ -1,95 +1,135 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/db";
 import { z } from "zod";
-import { Pool } from "pg";
 
 export const dynamic = "force-dynamic";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+const violationQuerySchema = z.object({
+  status: z
+    .enum(["pending", "under_review", "resolved", "dismissed"])
+    .optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
 const createViolationSchema = z.object({
-  property_id: z.number().int().positive(),
-  category_id: z.number().int().positive(),
-  description: z.string().min(1).max(5000),
-  status: z
-    .enum(["open", "in_progress", "resolved", "closed"])
-    .optional()
-    .default("open"),
-  severity: z
-    .enum(["low", "medium", "high", "critical"])
-    .optional()
-    .default("medium"),
-  reported_date: z.string().optional(),
-  due_date: z.string().optional().nullable(),
-  notes: z.string().optional().nullable(),
+  title: z.string().min(1).max(255),
+  description: z.string().min(1),
+  location: z.string().min(1).max(500),
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  violation_type: z.string().min(1).max(100),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  evidence_urls: z.array(z.string().url()).optional().default([]),
 });
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getServerSession();
-    if (!session) {
+    const session = await getServerSession(authOptions);
+
+    if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
-    const status = searchParams.get("status");
-    const property_id = searchParams.get("property_id");
+    const queryParams = {
+      status: searchParams.get("status") || undefined,
+      page: searchParams.get("page") || 1,
+      limit: searchParams.get("limit") || 20,
+    };
 
-    const conditions: string[] = [];
-    const values: (string | number)[] = [];
+    const parsed = violationQuerySchema.safeParse(queryParams);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "Invalid query parameters", details: parsed.error.flatten() },
+        { status: 400 },
+      );
+    }
+
+    const { status, page, limit } = parsed.data;
+    const offset = (page - 1) * limit;
+
+    const userRole = (session.user as any).role;
+    const userId = (session.user as any).id;
+
+    let whereClause = "WHERE 1=1";
+    const queryValues: any[] = [];
     let paramIndex = 1;
 
     if (status) {
-      conditions.push(`v.status = $${paramIndex}`);
-      values.push(status);
+      whereClause += ` AND v.status = $${paramIndex}`;
+      queryValues.push(status);
       paramIndex++;
     }
 
-    if (property_id) {
-      const parsedPropertyId = parseInt(property_id, 10);
-      if (!isNaN(parsedPropertyId)) {
-        conditions.push(`v.property_id = $${paramIndex}`);
-        values.push(parsedPropertyId);
-        paramIndex++;
-      }
+    // Role-scoped access
+    if (userRole === "citizen") {
+      whereClause += ` AND v.reported_by = $${paramIndex}`;
+      queryValues.push(userId);
+      paramIndex++;
+    } else if (userRole === "inspector") {
+      whereClause += ` AND (v.reported_by = $${paramIndex} OR v.assigned_to = $${paramIndex + 1})`;
+      queryValues.push(userId, userId);
+      paramIndex += 2;
     }
+    // manager and admin can see all violations
 
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    const query = `
-      SELECT
-        v.id,
-        v.property_id,
-        v.category_id,
-        v.description,
-        v.status,
-        v.severity,
-        v.reported_date,
-        v.due_date,
-        v.notes,
-        v.created_at,
-        v.updated_at,
-        p.name AS property_name,
-        p.address AS property_address,
-        c.name AS category_name,
-        c.code AS category_code
+    const countQuery = `
+      SELECT COUNT(*) as total
       FROM violations v
-      LEFT JOIN properties p ON v.property_id = p.id
-      LEFT JOIN violation_categories c ON v.category_id = c.id
       ${whereClause}
-      ORDER BY v.created_at DESC
     `;
 
-    const client = await pool.connect();
-    try {
-      const result = await client.query(query, values);
-      return NextResponse.json({ violations: result.rows }, { status: 200 });
-    } finally {
-      client.release();
-    }
+    const dataQuery = `
+      SELECT
+        v.id,
+        v.title,
+        v.description,
+        v.location,
+        v.severity,
+        v.violation_type,
+        v.status,
+        v.latitude,
+        v.longitude,
+        v.evidence_urls,
+        v.created_at,
+        v.updated_at,
+        v.reported_by,
+        v.assigned_to,
+        reporter.name as reporter_name,
+        reporter.email as reporter_email,
+        assignee.name as assignee_name
+      FROM violations v
+      LEFT JOIN users reporter ON v.reported_by = reporter.id
+      LEFT JOIN users assignee ON v.assigned_to = assignee.id
+      ${whereClause}
+      ORDER BY v.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    queryValues.push(limit, offset);
+
+    const [countResult, dataResult] = await Promise.all([
+      db.query(countQuery, queryValues.slice(0, -2)),
+      db.query(dataQuery, queryValues),
+    ]);
+
+    const total = parseInt(countResult.rows[0].total, 10);
+    const totalPages = Math.ceil(total / limit);
+
+    return NextResponse.json({
+      violations: dataResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    });
   } catch (error) {
     console.error("GET /api/violations error:", error);
     return NextResponse.json(
@@ -101,9 +141,23 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession();
-    if (!session) {
+    const session = await getServerSession(authOptions);
+
+    if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const userRole = (session.user as any).role;
+    const userId = (session.user as any).id;
+
+    if (!["inspector", "manager", "admin"].includes(userRole)) {
+      return NextResponse.json(
+        {
+          error:
+            "Forbidden: Only inspectors and managers can create violations",
+        },
+        { status: 403 },
+      );
     }
 
     let body: unknown;
@@ -113,104 +167,75 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const parseResult = createViolationSchema.safeParse(body);
-    if (!parseResult.success) {
+    const parsed = createViolationSchema.safeParse(body);
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Validation failed", details: parseResult.error.flatten() },
-        { status: 422 },
+        { error: "Validation failed", details: parsed.error.flatten() },
+        { status: 400 },
       );
     }
 
     const {
-      property_id,
-      category_id,
+      title,
       description,
-      status,
+      location,
       severity,
-      reported_date,
-      due_date,
-      notes,
-    } = parseResult.data;
+      violation_type,
+      latitude,
+      longitude,
+      evidence_urls,
+    } = parsed.data;
 
-    const client = await pool.connect();
-    try {
-      const insertQuery = `
-        INSERT INTO violations (
-          property_id,
-          category_id,
-          description,
-          status,
-          severity,
-          reported_date,
-          due_date,
-          notes,
-          created_at,
-          updated_at
-        ) VALUES (
-          $1, $2, $3, $4, $5,
-          $6, $7, $8,
-          NOW(), NOW()
-        )
-        RETURNING
-          id,
-          property_id,
-          category_id,
-          description,
-          status,
-          severity,
-          reported_date,
-          due_date,
-          notes,
-          created_at,
-          updated_at
-      `;
-
-      const values = [
-        property_id,
-        category_id,
+    const result = await db.query(
+      `
+      INSERT INTO violations (
+        title,
         description,
-        status,
+        location,
         severity,
-        reported_date ?? new Date().toISOString().split("T")[0],
-        due_date ?? null,
-        notes ?? null,
-      ];
+        violation_type,
+        status,
+        latitude,
+        longitude,
+        evidence_urls,
+        reported_by,
+        created_at,
+        updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, NOW(), NOW()
+      )
+      RETURNING
+        id,
+        title,
+        description,
+        location,
+        severity,
+        violation_type,
+        status,
+        latitude,
+        longitude,
+        evidence_urls,
+        reported_by,
+        assigned_to,
+        created_at,
+        updated_at
+      `,
+      [
+        title,
+        description,
+        location,
+        severity,
+        violation_type,
+        latitude ?? null,
+        longitude ?? null,
+        JSON.stringify(evidence_urls),
+        userId,
+      ],
+    );
 
-      const result = await client.query(insertQuery, values);
-      const violation = result.rows[0];
+    const violation = result.rows[0];
 
-      const enrichedQuery = `
-        SELECT
-          v.id,
-          v.property_id,
-          v.category_id,
-          v.description,
-          v.status,
-          v.severity,
-          v.reported_date,
-          v.due_date,
-          v.notes,
-          v.created_at,
-          v.updated_at,
-          p.name AS property_name,
-          p.address AS property_address,
-          c.name AS category_name,
-          c.code AS category_code
-        FROM violations v
-        LEFT JOIN properties p ON v.property_id = p.id
-        LEFT JOIN violation_categories c ON v.category_id = c.id
-        WHERE v.id = $1
-      `;
-
-      const enrichedResult = await client.query(enrichedQuery, [violation.id]);
-
-      return NextResponse.json(
-        { violation: enrichedResult.rows[0] },
-        { status: 201 },
-      );
-    } finally {
-      client.release();
-    }
+    return NextResponse.json({ violation }, { status: 201 });
   } catch (error) {
     console.error("POST /api/violations error:", error);
     return NextResponse.json(

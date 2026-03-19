@@ -1,10 +1,10 @@
-const STATUS_CONFIG = {
+const statusConfig = {
   open: {
     label: "Open",
     className: "bg-red-100 text-red-800 border border-red-200",
   },
-  pending: {
-    label: "Pending",
+  "in-review": {
+    label: "In Review",
     className: "bg-yellow-100 text-yellow-800 border border-yellow-200",
   },
   resolved: {
@@ -17,17 +17,19 @@ const STATUS_CONFIG = {
   },
 } as const;
 
-export type ViolationStatus = keyof typeof STATUS_CONFIG;
+export type ViolationStatus = keyof typeof statusConfig;
 
 interface StatusBadgeProps {
-  status: ViolationStatus | string;
+  status: ViolationStatus;
   className?: string;
 }
 
-export function StatusBadge({ status, className = "" }: StatusBadgeProps) {
-  const normalizedStatus = status?.toLowerCase() as ViolationStatus;
-  const config = STATUS_CONFIG[normalizedStatus] ?? {
-    label: status ?? "Unknown",
+export default function StatusBadge({
+  status,
+  className = "",
+}: StatusBadgeProps) {
+  const config = statusConfig[status] ?? {
+    label: status,
     className: "bg-gray-100 text-gray-800 border border-gray-200",
   };
 
@@ -35,9 +37,18 @@ export function StatusBadge({ status, className = "" }: StatusBadgeProps) {
     <span
       className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${config.className} ${className}`}
     >
+      <span
+        className={`w-1.5 h-1.5 rounded-full mr-1.5 ${
+          status === "open"
+            ? "bg-red-500"
+            : status === "in-review"
+              ? "bg-yellow-500"
+              : status === "resolved"
+                ? "bg-green-500"
+                : "bg-gray-500"
+        }`}
+      />
       {config.label}
     </span>
   );
 }
-
-export default StatusBadge;

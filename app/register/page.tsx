@@ -130,10 +130,9 @@ export default function RegisterPage() {
                 value={formData.password}
                 onChange={handleChange}
                 className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                placeholder="••••••••"
+                placeholder="Minimum 8 characters"
                 minLength={8}
               />
-              <p className="mt-1 text-xs text-gray-500">Minimum 8 characters</p>
             </div>
 
             <div>

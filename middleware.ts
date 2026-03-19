@@ -1,39 +1,43 @@
-import { getToken } from "next-auth/jwt";
-import { NextRequest, NextResponse } from "next/server";
+import { withAuth } from "next-auth/middleware";
+import { NextResponse } from "next/server";
 
-export async function middleware(request: NextRequest) {
-  const token = await getToken({
-    req: request,
-    secret: process.env.NEXTAUTH_SECRET,
-  });
+export default withAuth(
+  function middleware(req) {
+    const token = req.nextauth.token;
+    const pathname = req.nextUrl.pathname;
 
-  const { pathname } = request.nextUrl;
+    if (pathname.startsWith("/dashboard")) {
+      if (!token) {
+        return NextResponse.redirect(new URL("/auth/signin", req.url));
+      }
+      if (token.role !== "manager" && token.role !== "inspector") {
+        return NextResponse.redirect(new URL("/unauthorized", req.url));
+      }
+    }
 
-  const protectedRoutes = [
-    "/dashboard",
-    "/violations",
-    "/properties",
-    "/fines",
-  ];
+    if (pathname.startsWith("/portal")) {
+      if (!token) {
+        return NextResponse.redirect(new URL("/auth/signin", req.url));
+      }
+      if (token.role !== "owner") {
+        return NextResponse.redirect(new URL("/unauthorized", req.url));
+      }
+    }
 
-  const isProtectedRoute = protectedRoutes.some(
-    (route) => pathname === route || pathname.startsWith(`${route}/`),
-  );
-
-  if (isProtectedRoute && !token) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("callbackUrl", request.url);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  return NextResponse.next();
-}
+    return NextResponse.next();
+  },
+  {
+    callbacks: {
+      authorized: ({ token }) => {
+        return true;
+      },
+    },
+    pages: {
+      signIn: "/auth/signin",
+    },
+  },
+);
 
 export const config = {
-  matcher: [
-    "/dashboard/:path*",
-    "/violations/:path*",
-    "/properties/:path*",
-    "/fines/:path*",
-  ],
+  matcher: ["/dashboard/:path*", "/portal/:path*"],
 };
