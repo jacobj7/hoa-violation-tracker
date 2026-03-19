@@ -4,31 +4,46 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-async function migrate() {
+export async function runMigrations(): Promise<void> {
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
+      CREATE TABLE IF NOT EXISTS communities (
         id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        name VARCHAR(255),
-        role VARCHAR(50) NOT NULL DEFAULT 'user',
+        name VARCHAR(255) NOT NULL,
+        address TEXT,
+        city VARCHAR(100),
+        state VARCHAR(50),
+        zip VARCHAR(20),
+        phone VARCHAR(30),
+        email VARCHAR(255),
+        website VARCHAR(255),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS owners (
+      DO $$ BEGIN
+        CREATE TYPE user_role AS ENUM ('manager', 'inspector', 'board', 'owner');
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
+        community_id INTEGER REFERENCES communities(id) ON DELETE SET NULL,
         name VARCHAR(255) NOT NULL,
-        email VARCHAR(255),
-        phone VARCHAR(50),
-        address TEXT,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        role user_role NOT NULL DEFAULT 'owner',
+        phone VARCHAR(30),
+        is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
@@ -37,38 +52,52 @@ async function migrate() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS properties (
         id SERIAL PRIMARY KEY,
+        community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+        owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
         address TEXT NOT NULL,
-        parcel_number VARCHAR(100) UNIQUE,
-        property_type VARCHAR(100),
-        owner_id INTEGER REFERENCES owners(id) ON DELETE SET NULL,
-        latitude DECIMAL(10, 8),
-        longitude DECIMAL(11, 8),
+        unit VARCHAR(50),
+        city VARCHAR(100),
+        state VARCHAR(50),
+        zip VARCHAR(20),
+        lot_number VARCHAR(50),
+        parcel_number VARCHAR(100),
+        notes TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS violation_categories (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        base_fine_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
+      DO $$ BEGIN
+        CREATE TYPE violation_status AS ENUM (
+          'open',
+          'pending_review',
+          'notice_sent',
+          'hearing_scheduled',
+          'resolved',
+          'appealed',
+          'closed'
+        );
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
     `);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS violations (
         id SERIAL PRIMARY KEY,
+        community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
         property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
-        category_id INTEGER REFERENCES violation_categories(id) ON DELETE SET NULL,
         reported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-        status VARCHAR(50) NOT NULL DEFAULT 'open',
+        assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        title VARCHAR(255) NOT NULL,
         description TEXT,
-        inspection_date DATE,
-        resolution_date DATE,
+        violation_code VARCHAR(100),
+        status violation_status NOT NULL DEFAULT 'open',
+        severity VARCHAR(50) DEFAULT 'medium',
+        occurred_at TIMESTAMP WITH TIME ZONE,
+        due_date TIMESTAMP WITH TIME ZONE,
+        resolved_at TIMESTAMP WITH TIME ZONE,
         notes TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -76,106 +105,171 @@ async function migrate() {
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS fines (
+      CREATE TABLE IF NOT EXISTS evidence (
         id SERIAL PRIMARY KEY,
         violation_id INTEGER NOT NULL REFERENCES violations(id) ON DELETE CASCADE,
-        amount DECIMAL(10, 2) NOT NULL,
-        status VARCHAR(50) NOT NULL DEFAULT 'unpaid',
-        issued_date DATE NOT NULL DEFAULT CURRENT_DATE,
-        due_date DATE,
-        paid_date DATE,
-        payment_reference VARCHAR(255),
-        notes TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        file_name VARCHAR(255) NOT NULL,
+        file_url TEXT NOT NULL,
+        file_type VARCHAR(100),
+        file_size INTEGER,
+        description TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
+    `);
+
+    await client.query(`
+      DO $$ BEGIN
+        CREATE TYPE notice_type AS ENUM (
+          'courtesy',
+          'first_warning',
+          'second_warning',
+          'final_warning',
+          'hearing_notice',
+          'fine_notice',
+          'resolution_notice'
+        );
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
     `);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS notices (
         id SERIAL PRIMARY KEY,
         violation_id INTEGER NOT NULL REFERENCES violations(id) ON DELETE CASCADE,
-        notice_type VARCHAR(100) NOT NULL,
-        sent_date DATE,
-        delivery_method VARCHAR(100),
-        delivery_status VARCHAR(100),
-        content TEXT,
-        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        sent_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        notice_type notice_type NOT NULL DEFAULT 'courtesy',
+        subject VARCHAR(255),
+        body TEXT NOT NULL,
+        sent_at TIMESTAMP WITH TIME ZONE,
+        delivered_at TIMESTAMP WITH TIME ZONE,
+        method VARCHAR(50) DEFAULT 'email',
+        recipient_email VARCHAR(255),
+        recipient_address TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
     `);
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
+      DO $$ BEGIN
+        CREATE TYPE fine_status AS ENUM (
+          'pending',
+          'issued',
+          'paid',
+          'waived',
+          'appealed',
+          'overdue'
+        );
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS fines (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-        action VARCHAR(255) NOT NULL,
-        table_name VARCHAR(100),
-        record_id INTEGER,
-        old_values JSONB,
-        new_values JSONB,
-        ip_address VARCHAR(50),
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        violation_id INTEGER NOT NULL REFERENCES violations(id) ON DELETE CASCADE,
+        property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+        issued_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        amount NUMERIC(10, 2) NOT NULL,
+        status fine_status NOT NULL DEFAULT 'pending',
+        description TEXT,
+        due_date TIMESTAMP WITH TIME ZONE,
+        paid_at TIMESTAMP WITH TIME ZONE,
+        payment_method VARCHAR(100),
+        payment_reference VARCHAR(255),
+        waived_reason TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
     `);
 
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_properties_owner_id ON properties(owner_id);
-      CREATE INDEX IF NOT EXISTS idx_violations_property_id ON violations(property_id);
-      CREATE INDEX IF NOT EXISTS idx_violations_category_id ON violations(category_id);
-      CREATE INDEX IF NOT EXISTS idx_violations_status ON violations(status);
-      CREATE INDEX IF NOT EXISTS idx_fines_violation_id ON fines(violation_id);
-      CREATE INDEX IF NOT EXISTS idx_fines_status ON fines(status);
-      CREATE INDEX IF NOT EXISTS idx_notices_violation_id ON notices(violation_id);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_table_name ON audit_logs(table_name);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+      DO $$ BEGIN
+        CREATE TYPE hearing_status AS ENUM (
+          'scheduled',
+          'in_progress',
+          'completed',
+          'cancelled',
+          'postponed'
+        );
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
     `);
 
     await client.query(`
-      CREATE OR REPLACE FUNCTION update_updated_at_column()
-      RETURNS TRIGGER AS $$
-      BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-      END;
-      $$ language 'plpgsql';
+      CREATE TABLE IF NOT EXISTS hearings (
+        id SERIAL PRIMARY KEY,
+        violation_id INTEGER NOT NULL REFERENCES violations(id) ON DELETE CASCADE,
+        scheduled_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        status hearing_status NOT NULL DEFAULT 'scheduled',
+        scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        location TEXT,
+        notes TEXT,
+        outcome TEXT,
+        outcome_notes TEXT,
+        completed_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
     `);
 
-    const tables = [
-      "users",
-      "owners",
-      "properties",
-      "violation_categories",
-      "violations",
-      "fines",
-      "notices",
-    ];
+    await client.query(`
+      DO $$ BEGIN
+        CREATE TYPE appeal_status AS ENUM (
+          'submitted',
+          'under_review',
+          'approved',
+          'denied',
+          'withdrawn'
+        );
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
 
-    for (const table of tables) {
-      await client.query(`
-        DROP TRIGGER IF EXISTS update_${table}_updated_at ON ${table};
-        CREATE TRIGGER update_${table}_updated_at
-          BEFORE UPDATE ON ${table}
-          FOR EACH ROW
-          EXECUTE FUNCTION update_updated_at_column();
-      `);
-    }
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS appeals (
+        id SERIAL PRIMARY KEY,
+        violation_id INTEGER NOT NULL REFERENCES violations(id) ON DELETE CASCADE,
+        fine_id INTEGER REFERENCES fines(id) ON DELETE SET NULL,
+        submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        status appeal_status NOT NULL DEFAULT 'submitted',
+        reason TEXT NOT NULL,
+        supporting_documents TEXT,
+        decision TEXT,
+        decision_notes TEXT,
+        submitted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        reviewed_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `);
 
     await client.query("COMMIT");
-    console.log("Migration completed successfully.");
+
+    console.log("Migrations completed successfully.");
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Migration failed:", error);
+    console.error("Migration failed, rolling back:", error);
     throw error;
   } finally {
     client.release();
-    await pool.end();
   }
 }
 
-migrate().catch((error) => {
-  console.error("Fatal migration error:", error);
-  process.exit(1);
-});
+if (require.main === module) {
+  runMigrations()
+    .then(() => {
+      console.log("Migration script finished.");
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("Migration script error:", err);
+      process.exit(1);
+    });
+}

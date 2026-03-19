@@ -1,135 +1,85 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { query } from "@/lib/db";
+import { sendEmail } from "@/lib/email";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
-const violationQuerySchema = z.object({
-  status: z
-    .enum(["pending", "under_review", "resolved", "dismissed"])
-    .optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
-});
-
 const createViolationSchema = z.object({
+  property_id: z.number().int().positive(),
   title: z.string().min(1).max(255),
   description: z.string().min(1),
-  location: z.string().min(1).max(500),
-  severity: z.enum(["low", "medium", "high", "critical"]),
-  violation_type: z.string().min(1).max(100),
-  latitude: z.number().optional(),
-  longitude: z.number().optional(),
-  evidence_urls: z.array(z.string().url()).optional().default([]),
+  status: z
+    .enum(["open", "in_progress", "resolved", "closed"])
+    .optional()
+    .default("open"),
+  severity: z
+    .enum(["low", "medium", "high", "critical"])
+    .optional()
+    .default("medium"),
+  reported_by: z.string().optional(),
+  due_date: z.string().optional().nullable(),
 });
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-
-    if (!session || !session.user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
-    const queryParams = {
-      status: searchParams.get("status") || undefined,
-      page: searchParams.get("page") || 1,
-      limit: searchParams.get("limit") || 20,
-    };
+    const status = searchParams.get("status");
+    const property_id = searchParams.get("property_id");
 
-    const parsed = violationQuerySchema.safeParse(queryParams);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: "Invalid query parameters", details: parsed.error.flatten() },
-        { status: 400 },
-      );
-    }
-
-    const { status, page, limit } = parsed.data;
-    const offset = (page - 1) * limit;
-
-    const userRole = (session.user as any).role;
-    const userId = (session.user as any).id;
-
-    let whereClause = "WHERE 1=1";
-    const queryValues: any[] = [];
+    const conditions: string[] = [];
+    const values: (string | number)[] = [];
     let paramIndex = 1;
 
     if (status) {
-      whereClause += ` AND v.status = $${paramIndex}`;
-      queryValues.push(status);
-      paramIndex++;
+      conditions.push(`v.status = $${paramIndex++}`);
+      values.push(status);
     }
 
-    // Role-scoped access
-    if (userRole === "citizen") {
-      whereClause += ` AND v.reported_by = $${paramIndex}`;
-      queryValues.push(userId);
-      paramIndex++;
-    } else if (userRole === "inspector") {
-      whereClause += ` AND (v.reported_by = $${paramIndex} OR v.assigned_to = $${paramIndex + 1})`;
-      queryValues.push(userId, userId);
-      paramIndex += 2;
+    if (property_id) {
+      const parsedPropertyId = parseInt(property_id, 10);
+      if (isNaN(parsedPropertyId)) {
+        return NextResponse.json(
+          { error: "Invalid property_id" },
+          { status: 400 },
+        );
+      }
+      conditions.push(`v.property_id = $${paramIndex++}`);
+      values.push(parsedPropertyId);
     }
-    // manager and admin can see all violations
 
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM violations v
-      ${whereClause}
-    `;
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const dataQuery = `
-      SELECT
+    const result = await query(
+      `SELECT 
         v.id,
+        v.property_id,
         v.title,
         v.description,
-        v.location,
-        v.severity,
-        v.violation_type,
         v.status,
-        v.latitude,
-        v.longitude,
-        v.evidence_urls,
+        v.severity,
+        v.reported_by,
+        v.due_date,
         v.created_at,
         v.updated_at,
-        v.reported_by,
-        v.assigned_to,
-        reporter.name as reporter_name,
-        reporter.email as reporter_email,
-        assignee.name as assignee_name
+        p.address AS property_address,
+        p.name AS property_name
       FROM violations v
-      LEFT JOIN users reporter ON v.reported_by = reporter.id
-      LEFT JOIN users assignee ON v.assigned_to = assignee.id
+      LEFT JOIN properties p ON p.id = v.property_id
       ${whereClause}
-      ORDER BY v.created_at DESC
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-    `;
+      ORDER BY v.created_at DESC`,
+      values,
+    );
 
-    queryValues.push(limit, offset);
-
-    const [countResult, dataResult] = await Promise.all([
-      db.query(countQuery, queryValues.slice(0, -2)),
-      db.query(dataQuery, queryValues),
-    ]);
-
-    const total = parseInt(countResult.rows[0].total, 10);
-    const totalPages = Math.ceil(total / limit);
-
-    return NextResponse.json({
-      violations: dataResult.rows,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages,
-        hasNextPage: page < totalPages,
-        hasPrevPage: page > 1,
-      },
-    });
+    return NextResponse.json({ violations: result.rows }, { status: 200 });
   } catch (error) {
     console.error("GET /api/violations error:", error);
     return NextResponse.json(
@@ -142,22 +92,8 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-
-    if (!session || !session.user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const userRole = (session.user as any).role;
-    const userId = (session.user as any).id;
-
-    if (!["inspector", "manager", "admin"].includes(userRole)) {
-      return NextResponse.json(
-        {
-          error:
-            "Forbidden: Only inspectors and managers can create violations",
-        },
-        { status: 403 },
-      );
     }
 
     let body: unknown;
@@ -171,69 +107,95 @@ export async function POST(request: NextRequest) {
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Validation failed", details: parsed.error.flatten() },
-        { status: 400 },
+        { status: 422 },
       );
     }
 
     const {
+      property_id,
       title,
       description,
-      location,
+      status,
       severity,
-      violation_type,
-      latitude,
-      longitude,
-      evidence_urls,
+      reported_by,
+      due_date,
     } = parsed.data;
 
-    const result = await db.query(
-      `
-      INSERT INTO violations (
-        title,
-        description,
-        location,
-        severity,
-        violation_type,
-        status,
-        latitude,
-        longitude,
-        evidence_urls,
-        reported_by,
-        created_at,
-        updated_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, NOW(), NOW()
-      )
-      RETURNING
-        id,
-        title,
-        description,
-        location,
-        severity,
-        violation_type,
-        status,
-        latitude,
-        longitude,
-        evidence_urls,
-        reported_by,
-        assigned_to,
-        created_at,
-        updated_at
-      `,
+    // Verify property exists
+    const propertyResult = await query(
+      `SELECT id, name, address FROM properties WHERE id = $1`,
+      [property_id],
+    );
+
+    if (propertyResult.rows.length === 0) {
+      return NextResponse.json(
+        { error: "Property not found" },
+        { status: 404 },
+      );
+    }
+
+    const property = propertyResult.rows[0];
+
+    const insertResult = await query(
+      `INSERT INTO violations (property_id, title, description, status, severity, reported_by, due_date, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+       RETURNING *`,
       [
+        property_id,
         title,
         description,
-        location,
+        status,
         severity,
-        violation_type,
-        latitude ?? null,
-        longitude ?? null,
-        JSON.stringify(evidence_urls),
-        userId,
+        reported_by ?? session.user?.name ?? null,
+        due_date ?? null,
       ],
     );
 
-    const violation = result.rows[0];
+    const violation = insertResult.rows[0];
+
+    // Send email notification
+    try {
+      const userEmail = session.user?.email;
+      if (userEmail) {
+        await sendEmail({
+          to: userEmail,
+          subject: `New Violation Created: ${title}`,
+          html: `
+            <h2>New Violation Report</h2>
+            <p>A new violation has been created for property <strong>${property.name || property.address}</strong>.</p>
+            <table style="border-collapse: collapse; width: 100%;">
+              <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;"><strong>Title</strong></td>
+                <td style="padding: 8px; border: 1px solid #ddd;">${title}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;"><strong>Description</strong></td>
+                <td style="padding: 8px; border: 1px solid #ddd;">${description}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;"><strong>Status</strong></td>
+                <td style="padding: 8px; border: 1px solid #ddd;">${status}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;"><strong>Severity</strong></td>
+                <td style="padding: 8px; border: 1px solid #ddd;">${severity}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #ddd;"><strong>Property</strong></td>
+                <td style="padding: 8px; border: 1px solid #ddd;">${property.name || property.address}</td>
+              </tr>
+              ${due_date ? `<tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Due Date</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${due_date}</td></tr>` : ""}
+            </table>
+            <p>Violation ID: ${violation.id}</p>
+            <p>Created at: ${new Date(violation.created_at).toLocaleString()}</p>
+          `,
+          text: `New Violation Created: ${title}\n\nProperty: ${property.name || property.address}\nDescription: ${description}\nStatus: ${status}\nSeverity: ${severity}${due_date ? `\nDue Date: ${due_date}` : ""}\n\nViolation ID: ${violation.id}`,
+        });
+      }
+    } catch (emailError) {
+      console.error("Failed to send violation notification email:", emailError);
+      // Don't fail the request if email fails
+    }
 
     return NextResponse.json({ violation }, { status: 201 });
   } catch (error) {

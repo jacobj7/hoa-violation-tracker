@@ -10,7 +10,10 @@ const pool = new Pool({
 });
 
 const paymentSchema = z.object({
-  payment_date: z.string().datetime().optional(),
+  payment_date: z
+    .string()
+    .optional()
+    .default(() => new Date().toISOString()),
 });
 
 export async function PATCH(
@@ -19,13 +22,11 @@ export async function PATCH(
 ) {
   try {
     const session = await getServerSession();
-
     if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const fineId = params.id;
-
     if (!fineId || isNaN(Number(fineId))) {
       return NextResponse.json({ error: "Invalid fine ID" }, { status: 400 });
     }
@@ -38,7 +39,6 @@ export async function PATCH(
     }
 
     const parsed = paymentSchema.safeParse(body);
-
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid request body", details: parsed.error.flatten() },
@@ -46,12 +46,9 @@ export async function PATCH(
       );
     }
 
-    const paymentDate = parsed.data.payment_date
-      ? new Date(parsed.data.payment_date)
-      : new Date();
+    const { payment_date } = parsed.data;
 
     const client = await pool.connect();
-
     try {
       const checkResult = await client.query(
         "SELECT id, status FROM fines WHERE id = $1",
@@ -63,7 +60,6 @@ export async function PATCH(
       }
 
       const fine = checkResult.rows[0];
-
       if (fine.status === "paid") {
         return NextResponse.json(
           { error: "Fine is already marked as paid" },
@@ -76,15 +72,13 @@ export async function PATCH(
          SET status = 'paid', payment_date = $1, updated_at = NOW()
          WHERE id = $2
          RETURNING *`,
-        [paymentDate, fineId],
+        [payment_date, fineId],
       );
-
-      const updatedFine = updateResult.rows[0];
 
       return NextResponse.json(
         {
           message: "Fine marked as paid successfully",
-          fine: updatedFine,
+          fine: updateResult.rows[0],
         },
         { status: 200 },
       );
@@ -92,7 +86,7 @@ export async function PATCH(
       client.release();
     }
   } catch (error) {
-    console.error("Error processing payment for fine:", error);
+    console.error("Error updating fine payment status:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

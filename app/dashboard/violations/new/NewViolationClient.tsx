@@ -1,524 +1,551 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { z } from "zod";
-
-const violationSchema = z.object({
-  propertyId: z.string().min(1, "Property is required"),
-  category: z.string().min(1, "Category is required"),
-  description: z.string().min(10, "Description must be at least 10 characters"),
-  severity: z.enum(["low", "medium", "high", "critical"]),
-});
-
-type ViolationFormData = z.infer<typeof violationSchema>;
 
 interface Property {
   id: string;
   address: string;
-  unit?: string;
+  owner_name: string;
+  unit_number?: string;
 }
 
-interface FormErrors {
-  propertyId?: string;
-  category?: string;
-  description?: string;
-  severity?: string;
-  photo?: string;
-  general?: string;
-}
-
-const VIOLATION_CATEGORIES = [
-  "Noise Complaint",
-  "Parking Violation",
-  "Property Damage",
-  "Unauthorized Pet",
-  "Lease Violation",
-  "Safety Hazard",
-  "Trash/Debris",
-  "Unauthorized Occupant",
-  "Landscaping",
-  "Other",
-];
-
-const SEVERITY_OPTIONS = [
-  { value: "low", label: "Low", color: "text-green-600" },
-  { value: "medium", label: "Medium", color: "text-yellow-600" },
-  { value: "high", label: "High", color: "text-orange-600" },
-  { value: "critical", label: "Critical", color: "text-red-600" },
-];
-
-interface NewViolationClientProps {
+interface PropertySearchResult {
   properties: Property[];
 }
 
-export default function NewViolationClient({
-  properties,
-}: NewViolationClientProps) {
+const VIOLATION_TYPES = [
+  "Noise Complaint",
+  "Parking Violation",
+  "Trash/Debris",
+  "Unauthorized Pet",
+  "Lease Violation",
+  "Property Damage",
+  "Unauthorized Occupant",
+  "HOA Rule Violation",
+  "Safety Hazard",
+  "Other",
+];
+
+const SEVERITY_LEVELS = [
+  {
+    value: "low",
+    label: "Low",
+    color: "text-green-600 bg-green-50 border-green-200",
+  },
+  {
+    value: "medium",
+    label: "Medium",
+    color: "text-yellow-600 bg-yellow-50 border-yellow-200",
+  },
+  {
+    value: "high",
+    label: "High",
+    color: "text-orange-600 bg-orange-50 border-orange-200",
+  },
+  {
+    value: "critical",
+    label: "Critical",
+    color: "text-red-600 bg-red-50 border-red-200",
+  },
+];
+
+export default function NewViolationClient() {
   const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [formData, setFormData] = useState<ViolationFormData>({
-    propertyId: "",
-    category: "",
-    description: "",
-    severity: "medium",
-  });
+  const [propertySearch, setPropertySearch] = useState("");
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [selectedProperty, setSelectedProperty] = useState<Property | null>(
+    null,
+  );
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
 
-  const [errors, setErrors] = useState<FormErrors>({});
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
+  const [violationType, setViolationType] = useState("");
+  const [description, setDescription] = useState("");
+  const [severity, setSeverity] = useState("medium");
+  const [incidentDate, setIncidentDate] = useState("");
+  const [notes, setNotes] = useState("");
 
-  const handleInputChange = (
-    e: React.ChangeEvent<
-      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
-    >,
-  ) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
-    if (errors[name as keyof FormErrors]) {
-      setErrors((prev) => ({ ...prev, [name]: undefined }));
-    }
-  };
+  const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState("");
 
-  const handleFileSelect = useCallback((file: File) => {
-    if (!file.type.startsWith("image/")) {
-      setErrors((prev) => ({
-        ...prev,
-        photo: "Please select a valid image file",
-      }));
+  const searchProperties = useCallback(async (query: string) => {
+    if (!query.trim() || query.length < 2) {
+      setProperties([]);
+      setShowDropdown(false);
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
-      setErrors((prev) => ({ ...prev, photo: "Image must be less than 10MB" }));
-      return;
+
+    setSearchLoading(true);
+    try {
+      const res = await fetch(
+        `/api/properties?search=${encodeURIComponent(query)}&limit=10`,
+      );
+      if (!res.ok) throw new Error("Failed to fetch properties");
+      const data: PropertySearchResult = await res.json();
+      setProperties(data.properties || []);
+      setShowDropdown(true);
+    } catch (err) {
+      console.error("Property search error:", err);
+      setProperties([]);
+    } finally {
+      setSearchLoading(false);
     }
-    setPhotoFile(file);
-    setErrors((prev) => ({ ...prev, photo: undefined }));
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setPhotoPreview(reader.result as string);
-    };
-    reader.readAsDataURL(file);
   }, []);
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) handleFileSelect(file);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (propertySearch && !selectedProperty) {
+        searchProperties(propertySearch);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [propertySearch, selectedProperty, searchProperties]);
+
+  const handlePropertySelect = (property: Property) => {
+    setSelectedProperty(property);
+    setPropertySearch(property.address);
+    setShowDropdown(false);
+    setErrors((prev) => ({ ...prev, property: "" }));
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
+  const handlePropertySearchChange = (value: string) => {
+    setPropertySearch(value);
+    if (selectedProperty && value !== selectedProperty.address) {
+      setSelectedProperty(null);
+    }
   };
 
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
+  const validate = () => {
+    const newErrors: Record<string, string> = {};
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) handleFileSelect(file);
-  };
-
-  const removePhoto = () => {
-    setPhotoFile(null);
-    setPhotoPreview(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const uploadPhoto = async (file: File): Promise<string> => {
-    const formData = new FormData();
-    formData.append("file", file);
-
-    setUploadProgress(10);
-
-    const response = await fetch("/api/upload", {
-      method: "POST",
-      body: formData,
-    });
-
-    setUploadProgress(80);
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ error: "Upload failed" }));
-      throw new Error(error.error || "Failed to upload photo");
+    if (!selectedProperty) {
+      newErrors.property = "Please select a property from the search results";
+    }
+    if (!violationType) {
+      newErrors.violationType = "Please select a violation type";
+    }
+    if (!description.trim()) {
+      newErrors.description = "Description is required";
+    } else if (description.trim().length < 10) {
+      newErrors.description = "Description must be at least 10 characters";
+    }
+    if (!severity) {
+      newErrors.severity = "Please select a severity level";
     }
 
-    const data = await response.json();
-    setUploadProgress(100);
-    return data.url;
-  };
-
-  const validateForm = (): boolean => {
-    const result = violationSchema.safeParse(formData);
-    if (!result.success) {
-      const fieldErrors: FormErrors = {};
-      result.error.errors.forEach((err) => {
-        const field = err.path[0] as keyof FormErrors;
-        fieldErrors[field] = err.message;
-      });
-      setErrors(fieldErrors);
-      return false;
-    }
-    setErrors({});
-    return true;
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError("");
 
-    if (!validateForm()) return;
+    if (!validate()) return;
 
-    setIsSubmitting(true);
-    setErrors({});
-
+    setSubmitting(true);
     try {
-      let photoUrl: string | undefined;
-
-      if (photoFile) {
-        try {
-          photoUrl = await uploadPhoto(photoFile);
-        } catch (uploadError) {
-          setErrors({
-            photo:
-              uploadError instanceof Error
-                ? uploadError.message
-                : "Upload failed",
-          });
-          setIsSubmitting(false);
-          return;
-        }
-      }
-
       const payload = {
-        ...formData,
-        ...(photoUrl && { photoUrl }),
+        property_id: selectedProperty!.id,
+        violation_type: violationType,
+        description: description.trim(),
+        severity,
+        incident_date: incidentDate || undefined,
+        notes: notes.trim() || undefined,
       };
 
-      const response = await fetch("/api/violations", {
+      const res = await fetch("/api/violations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ error: "Submission failed" }));
-        throw new Error(error.error || "Failed to submit violation");
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(
+          errorData.message || errorData.error || "Failed to create violation",
+        );
       }
 
-      const data = await response.json();
-      router.push(`/dashboard/violations/${data.id}`);
-      router.refresh();
+      const data = await res.json();
+      const violationId = data.violation?.id || data.id;
+
+      if (violationId) {
+        router.push(`/dashboard/violations/${violationId}`);
+      } else {
+        router.push("/dashboard/violations");
+      }
     } catch (err) {
-      setErrors({
-        general:
-          err instanceof Error ? err.message : "An unexpected error occurred",
-      });
+      console.error("Submit error:", err);
+      setSubmitError(
+        err instanceof Error ? err.message : "An unexpected error occurred",
+      );
     } finally {
-      setIsSubmitting(false);
-      setUploadProgress(0);
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <div className="bg-white shadow-sm rounded-lg border border-gray-200">
-        <div className="px-6 py-5 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">
-            Violation Details
-          </h2>
-          <p className="mt-1 text-sm text-gray-500">
-            Fill in the details below to report a new violation.
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-3xl mx-auto px-4 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <button
+            onClick={() => router.back()}
+            className="flex items-center text-sm text-gray-500 hover:text-gray-700 mb-4 transition-colors"
+          >
+            <svg
+              className="w-4 h-4 mr-1"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+            Back
+          </button>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Report New Violation
+          </h1>
+          <p className="text-gray-500 mt-1">
+            Fill out the form below to report a property violation
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-6">
-          {errors.general && (
-            <div className="rounded-md bg-red-50 p-4 border border-red-200">
-              <div className="flex">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Property Search */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-800 mb-4">
+              Property Information
+            </h2>
+
+            <div className="relative">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Property <span className="text-red-500">*</span>
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={propertySearch}
+                  onChange={(e) => handlePropertySearchChange(e.target.value)}
+                  onFocus={() => {
+                    if (properties.length > 0 && !selectedProperty)
+                      setShowDropdown(true);
+                  }}
+                  placeholder="Search by address or owner name..."
+                  className={`w-full px-4 py-2.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors ${
+                    errors.property
+                      ? "border-red-300 bg-red-50"
+                      : "border-gray-300"
+                  }`}
+                  autoComplete="off"
+                />
+                {searchLoading && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <svg
+                      className="animate-spin h-4 w-4 text-gray-400"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                      />
+                    </svg>
+                  </div>
+                )}
+              </div>
+
+              {/* Dropdown */}
+              {showDropdown && properties.length > 0 && (
+                <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                  {properties.map((property) => (
+                    <button
+                      key={property.id}
+                      type="button"
+                      onClick={() => handlePropertySelect(property)}
+                      className="w-full text-left px-4 py-3 hover:bg-blue-50 transition-colors border-b border-gray-100 last:border-0"
+                    >
+                      <div className="font-medium text-gray-800 text-sm">
+                        {property.address}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        {property.owner_name}
+                        {property.unit_number &&
+                          ` · Unit ${property.unit_number}`}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {showDropdown &&
+                !searchLoading &&
+                properties.length === 0 &&
+                propertySearch.length >= 2 && (
+                  <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-4 text-center text-sm text-gray-500">
+                    No properties found for &quot;{propertySearch}&quot;
+                  </div>
+                )}
+            </div>
+
+            {errors.property && (
+              <p className="mt-1.5 text-xs text-red-600 flex items-center gap-1">
                 <svg
-                  className="h-5 w-5 text-red-400 flex-shrink-0"
-                  viewBox="0 0 20 20"
+                  className="w-3.5 h-3.5"
                   fill="currentColor"
+                  viewBox="0 0 20 20"
                 >
                   <path
                     fillRule="evenodd"
-                    d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                    d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
                     clipRule="evenodd"
                   />
                 </svg>
-                <p className="ml-3 text-sm text-red-700">{errors.general}</p>
+                {errors.property}
+              </p>
+            )}
+
+            {selectedProperty && (
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-2">
+                <svg
+                  className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0"
+                  fill="currentColor"
+                  viewBox="0 0 20 20"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-blue-800">
+                    {selectedProperty.address}
+                  </p>
+                  <p className="text-xs text-blue-600">
+                    {selectedProperty.owner_name}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Violation Details */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-800 mb-4">
+              Violation Details
+            </h2>
+
+            <div className="space-y-5">
+              {/* Violation Type */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Violation Type <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={violationType}
+                  onChange={(e) => {
+                    setViolationType(e.target.value);
+                    setErrors((prev) => ({ ...prev, violationType: "" }));
+                  }}
+                  className={`w-full px-4 py-2.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors bg-white ${
+                    errors.violationType
+                      ? "border-red-300 bg-red-50"
+                      : "border-gray-300"
+                  }`}
+                >
+                  <option value="">Select a violation type...</option>
+                  {VIOLATION_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+                {errors.violationType && (
+                  <p className="mt-1.5 text-xs text-red-600 flex items-center gap-1">
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="currentColor"
+                      viewBox="0 0 20 20"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                    {errors.violationType}
+                  </p>
+                )}
+              </div>
+
+              {/* Severity */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Severity <span className="text-red-500">*</span>
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {SEVERITY_LEVELS.map((level) => (
+                    <button
+                      key={level.value}
+                      type="button"
+                      onClick={() => {
+                        setSeverity(level.value);
+                        setErrors((prev) => ({ ...prev, severity: "" }));
+                      }}
+                      className={`px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        severity === level.value
+                          ? `${level.color} border-current ring-2 ring-offset-1 ring-current`
+                          : "text-gray-600 bg-gray-50 border-gray-200 hover:bg-gray-100"
+                      }`}
+                    >
+                      {level.label}
+                    </button>
+                  ))}
+                </div>
+                {errors.severity && (
+                  <p className="mt-1.5 text-xs text-red-600">
+                    {errors.severity}
+                  </p>
+                )}
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Description <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  value={description}
+                  onChange={(e) => {
+                    setDescription(e.target.value);
+                    setErrors((prev) => ({ ...prev, description: "" }));
+                  }}
+                  rows={4}
+                  placeholder="Describe the violation in detail..."
+                  className={`w-full px-4 py-2.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors resize-none ${
+                    errors.description
+                      ? "border-red-300 bg-red-50"
+                      : "border-gray-300"
+                  }`}
+                />
+                <div className="flex justify-between items-center mt-1">
+                  {errors.description ? (
+                    <p className="text-xs text-red-600 flex items-center gap-1">
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="currentColor"
+                        viewBox="0 0 20 20"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                      {errors.description}
+                    </p>
+                  ) : (
+                    <span />
+                  )}
+                  <span className="text-xs text-gray-400">
+                    {description.length} chars
+                  </span>
+                </div>
+              </div>
+
+              {/* Incident Date */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Incident Date{" "}
+                  <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="date"
+                  value={incidentDate}
+                  onChange={(e) => setIncidentDate(e.target.value)}
+                  max={new Date().toISOString().split("T")[0]}
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                />
+              </div>
+
+              {/* Additional Notes */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Additional Notes{" "}
+                  <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={3}
+                  placeholder="Any additional context or notes..."
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors resize-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Submit Error */}
+          {submitError && (
+            <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5"
+                fill="currentColor"
+                viewBox="0 0 20 20"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              <div>
+                <p className="text-sm font-medium text-red-800">
+                  Failed to submit violation
+                </p>
+                <p className="text-sm text-red-600 mt-0.5">{submitError}</p>
               </div>
             </div>
           )}
 
-          {/* Property Selection */}
-          <div>
-            <label
-              htmlFor="propertyId"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Property <span className="text-red-500">*</span>
-            </label>
-            <select
-              id="propertyId"
-              name="propertyId"
-              value={formData.propertyId}
-              onChange={handleInputChange}
-              className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                errors.propertyId
-                  ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                  : "border-gray-300 focus:border-blue-500"
-              }`}
-            >
-              <option value="">Select a property...</option>
-              {properties.map((property) => (
-                <option key={property.id} value={property.id}>
-                  {property.address}
-                  {property.unit ? ` - Unit ${property.unit}` : ""}
-                </option>
-              ))}
-            </select>
-            {errors.propertyId && (
-              <p className="mt-1 text-xs text-red-600">{errors.propertyId}</p>
-            )}
-          </div>
-
-          {/* Category */}
-          <div>
-            <label
-              htmlFor="category"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Category <span className="text-red-500">*</span>
-            </label>
-            <select
-              id="category"
-              name="category"
-              value={formData.category}
-              onChange={handleInputChange}
-              className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                errors.category
-                  ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                  : "border-gray-300 focus:border-blue-500"
-              }`}
-            >
-              <option value="">Select a category...</option>
-              {VIOLATION_CATEGORIES.map((cat) => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
-            </select>
-            {errors.category && (
-              <p className="mt-1 text-xs text-red-600">{errors.category}</p>
-            )}
-          </div>
-
-          {/* Severity */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Severity <span className="text-red-500">*</span>
-            </label>
-            <div className="grid grid-cols-4 gap-3">
-              {SEVERITY_OPTIONS.map((option) => (
-                <label
-                  key={option.value}
-                  className={`relative flex cursor-pointer rounded-lg border p-3 focus:outline-none ${
-                    formData.severity === option.value
-                      ? "border-blue-500 bg-blue-50 ring-2 ring-blue-500"
-                      : "border-gray-300 bg-white hover:bg-gray-50"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="severity"
-                    value={option.value}
-                    checked={formData.severity === option.value}
-                    onChange={handleInputChange}
-                    className="sr-only"
-                  />
-                  <span className={`text-sm font-medium ${option.color}`}>
-                    {option.label}
-                  </span>
-                </label>
-              ))}
-            </div>
-            {errors.severity && (
-              <p className="mt-1 text-xs text-red-600">{errors.severity}</p>
-            )}
-          </div>
-
-          {/* Description */}
-          <div>
-            <label
-              htmlFor="description"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Description <span className="text-red-500">*</span>
-            </label>
-            <textarea
-              id="description"
-              name="description"
-              rows={4}
-              value={formData.description}
-              onChange={handleInputChange}
-              placeholder="Describe the violation in detail..."
-              className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none ${
-                errors.description
-                  ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                  : "border-gray-300 focus:border-blue-500"
-              }`}
-            />
-            <div className="mt-1 flex justify-between">
-              {errors.description ? (
-                <p className="text-xs text-red-600">{errors.description}</p>
-              ) : (
-                <span />
-              )}
-              <p className="text-xs text-gray-400">
-                {formData.description.length} characters
-              </p>
-            </div>
-          </div>
-
-          {/* Photo Upload */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Photo Evidence{" "}
-              <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-
-            {photoPreview ? (
-              <div className="relative rounded-lg overflow-hidden border border-gray-200">
-                <img
-                  src={photoPreview}
-                  alt="Violation preview"
-                  className="w-full h-48 object-cover"
-                />
-                <button
-                  type="button"
-                  onClick={removePhoto}
-                  className="absolute top-2 right-2 bg-white rounded-full p-1 shadow-md hover:bg-gray-100 transition-colors"
-                >
-                  <svg
-                    className="h-4 w-4 text-gray-600"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-                <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-40 px-3 py-2">
-                  <p className="text-white text-xs truncate">
-                    {photoFile?.name}
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`flex flex-col items-center justify-center rounded-lg border-2 border-dashed px-6 py-10 cursor-pointer transition-colors ${
-                  isDragging
-                    ? "border-blue-400 bg-blue-50"
-                    : "border-gray-300 hover:border-gray-400 hover:bg-gray-50"
-                }`}
-              >
-                <svg
-                  className="h-10 w-10 text-gray-400 mb-3"
-                  stroke="currentColor"
-                  fill="none"
-                  viewBox="0 0 48 48"
-                >
-                  <path
-                    d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <p className="text-sm text-gray-600">
-                  <span className="font-medium text-blue-600">
-                    Click to upload
-                  </span>{" "}
-                  or drag and drop
-                </p>
-                <p className="text-xs text-gray-400 mt-1">
-                  PNG, JPG, GIF, WEBP up to 10MB
-                </p>
-              </div>
-            )}
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              onChange={handleFileInputChange}
-              className="hidden"
-            />
-
-            {errors.photo && (
-              <p className="mt-1 text-xs text-red-600">{errors.photo}</p>
-            )}
-          </div>
-
-          {/* Upload Progress */}
-          {isSubmitting &&
-            photoFile &&
-            uploadProgress > 0 &&
-            uploadProgress < 100 && (
-              <div>
-                <div className="flex justify-between text-xs text-gray-500 mb-1">
-                  <span>Uploading photo...</span>
-                  <span>{uploadProgress}%</span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-1.5">
-                  <div
-                    className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
           {/* Actions */}
-          <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100">
+          <div className="flex items-center justify-end gap-3 pb-8">
             <button
               type="button"
               onClick={() => router.back()}
-              disabled={isSubmitting}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              disabled={submitting}
+              className="px-5 py-2.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="px-6 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+              disabled={submitting}
+              className="px-6 py-2.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              {isSubmitting ? (
+              {submitting ? (
                 <>
                   <svg
-                    className="animate-spin h-4 w-4 text-white"
-                    xmlns="http://www.w3.org/2000/svg"
+                    className="animate-spin h-4 w-4"
                     fill="none"
                     viewBox="0 0 24 24"
                   >
@@ -533,7 +560,7 @@ export default function NewViolationClient({
                     <path
                       className="opacity-75"
                       fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 14 6.373 14 12h-4z"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                     />
                   </svg>
                   Submitting...
