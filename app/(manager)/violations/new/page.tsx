@@ -1,21 +1,54 @@
-import { Metadata } from "next";
-import NewViolationForm from "./NewViolationForm";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { redirect } from "next/navigation";
+import { db } from "@/lib/db";
+import NewViolationClient from "./NewViolationClient";
 
-export const metadata: Metadata = {
-  title: "New Violation | Manager Portal",
-  description: "Create a new violation report",
-};
+async function getProperties() {
+  const result = await db.query(
+    `SELECT id, address, unit_number, owner_name 
+     FROM properties 
+     WHERE is_active = true 
+     ORDER BY address ASC`,
+  );
+  return result.rows;
+}
 
-export default function NewViolationPage() {
+async function getViolationTypes() {
+  const result = await db.query(
+    `SELECT id, name, description, default_fine_amount 
+     FROM violation_types 
+     WHERE is_active = true 
+     ORDER BY name ASC`,
+  );
+  return result.rows;
+}
+
+export default async function NewViolationPage() {
+  const session = await getServerSession(authOptions);
+
+  if (!session || !session.user) {
+    redirect("/login");
+  }
+
+  const [properties, violationTypes] = await Promise.all([
+    getProperties(),
+    getViolationTypes(),
+  ]);
+
   return (
-    <div className="container mx-auto py-8 px-4 max-w-2xl">
+    <div className="max-w-3xl mx-auto px-4 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">New Violation</h1>
-        <p className="text-gray-600 mt-1">
-          Fill out the form below to create a new violation report.
+        <p className="mt-1 text-sm text-gray-500">
+          Record a new property violation with details and supporting photos.
         </p>
       </div>
-      <NewViolationForm />
+      <NewViolationClient
+        properties={properties}
+        violationTypes={violationTypes}
+        userId={session.user.id as string}
+      />
     </div>
   );
 }

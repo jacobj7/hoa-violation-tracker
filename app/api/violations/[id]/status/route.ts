@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { z } from "zod";
-import { query } from "@/lib/db";
+import { Pool } from "pg";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
 const statusUpdateSchema = z.object({
   status: z.enum(["pending", "under_review", "resolved", "dismissed"]),
@@ -13,78 +16,92 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
-  const session = await getServerSession(authOptions);
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  if (session.user.role !== "admin" && session.user.role !== "moderator") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const violationId = params.id;
-
-  if (!violationId || isNaN(Number(violationId))) {
-    return NextResponse.json(
-      { error: "Invalid violation ID" },
-      { status: 400 },
-    );
-  }
-
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+    const session = await getServerSession();
 
-  const parseResult = statusUpdateSchema.safeParse(body);
-  if (!parseResult.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parseResult.error.flatten() },
-      { status: 400 },
-    );
-  }
+    if (!session || !session.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const { status, notes } = parseResult.data;
+    const violationId = params.id;
 
-  try {
-    const existingViolation = await query(
-      "SELECT id FROM violations WHERE id = $1",
-      [violationId],
-    );
-
-    if (existingViolation.rows.length === 0) {
+    if (!violationId || isNaN(Number(violationId))) {
       return NextResponse.json(
-        { error: "Violation not found" },
-        { status: 404 },
+        { error: "Invalid violation ID" },
+        { status: 400 },
       );
     }
 
-    const updatedViolation = await query(
-      `UPDATE violations 
-       SET status = $1, 
-           notes = COALESCE($2, notes), 
-           updated_at = NOW(),
-           reviewed_by = $3,
-           reviewed_at = NOW()
-       WHERE id = $4
-       RETURNING id, status, notes, updated_at, reviewed_by, reviewed_at`,
-      [status, notes ?? null, session.user.id, violationId],
-    );
+    const body = await request.json();
 
-    await query(
-      `INSERT INTO violation_audit_log (violation_id, changed_by, old_status, new_status, notes, created_at)
-       SELECT $1, $2, v_old.status, $3, $4, NOW()
-       FROM violations v_old WHERE v_old.id = $1`,
-      [violationId, session.user.id, status, notes ?? null],
-    );
+    const parseResult = statusUpdateSchema.safeParse(body);
 
-    return NextResponse.json({
-      message: "Violation status updated successfully",
-      violation: updatedViolation.rows[0],
-    });
+    if (!parseResult.success) {
+      return NextResponse.json(
+        {
+          error: "Invalid request body",
+          details: parseResult.error.flatten(),
+        },
+        { status: 400 },
+      );
+    }
+
+    const { status, notes } = parseResult.data;
+
+    const client = await pool.connect();
+
+    try {
+      const checkResult = await client.query(
+        "SELECT id, status FROM violations WHERE id = $1",
+        [violationId],
+      );
+
+      if (checkResult.rows.length === 0) {
+        return NextResponse.json(
+          { error: "Violation not found" },
+          { status: 404 },
+        );
+      }
+
+      const updateResult = await client.query(
+        `UPDATE violations
+         SET status = $1,
+             notes = COALESCE($2, notes),
+             updated_at = NOW(),
+             updated_by = $3
+         WHERE id = $4
+         RETURNING id, status, notes, updated_at, updated_by`,
+        [
+          status,
+          notes ?? null,
+          session.user.email ?? session.user.name,
+          violationId,
+        ],
+      );
+
+      const updatedViolation = updateResult.rows[0];
+
+      await client.query(
+        `INSERT INTO violation_status_history (violation_id, status, changed_by, changed_at, notes)
+         VALUES ($1, $2, $3, NOW(), $4)`,
+        [
+          violationId,
+          status,
+          session.user.email ?? session.user.name,
+          notes ?? null,
+        ],
+      );
+
+      return NextResponse.json(
+        {
+          message: "Violation status updated successfully",
+          violation: updatedViolation,
+        },
+        { status: 200 },
+      );
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.error("Error updating violation status:", error);
     return NextResponse.json(

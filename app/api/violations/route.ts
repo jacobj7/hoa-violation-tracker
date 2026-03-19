@@ -1,55 +1,54 @@
 import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import pool from "@/lib/db";
 import { z } from "zod";
-import { sendViolationEmail } from "@/lib/email";
 
 const violationSchema = z.object({
   property_id: z.number(),
   violation_type_id: z.number(),
   description: z.string().min(1),
-  due_date: z.string().optional(),
+  occurred_at: z.string().optional(),
+  fine_amount: z.number().optional(),
 });
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session?.user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
-    const status = searchParams.get("status");
     const propertyId = searchParams.get("property_id");
+    const status = searchParams.get("status");
 
     let query = `
-      SELECT v.*, p.address, vt.name as violation_type_name, u.name as owner_name, u.email as owner_email
+      SELECT v.*, p.address, p.owner_name, p.owner_email, vt.name as violation_type_name
       FROM violations v
       JOIN properties p ON v.property_id = p.id
       JOIN violation_types vt ON v.violation_type_id = vt.id
-      LEFT JOIN users u ON p.owner_id = u.id
       WHERE 1=1
     `;
-    const params: any[] = [];
-    let paramCount = 1;
-
-    if (status) {
-      query += ` AND v.status = $${paramCount++}`;
-      params.push(status);
-    }
+    const params: unknown[] = [];
+    let paramIndex = 1;
 
     if (propertyId) {
-      query += ` AND v.property_id = $${paramCount++}`;
+      query += ` AND v.property_id = $${paramIndex++}`;
       params.push(propertyId);
+    }
+
+    if (status) {
+      query += ` AND v.status = $${paramIndex++}`;
+      params.push(status);
     }
 
     query += " ORDER BY v.created_at DESC";
 
-    const result = await pool.query(query, params);
+    const result = await db.query(query, params);
     return NextResponse.json(result.rows);
   } catch (error) {
-    console.error("GET /api/violations error:", error);
+    console.error("Error fetching violations:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
@@ -60,7 +59,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session?.user) {
+    if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -71,50 +70,57 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: parsed.error.errors }, { status: 400 });
     }
 
-    const { property_id, violation_type_id, description, due_date } =
-      parsed.data;
+    const {
+      property_id,
+      violation_type_id,
+      description,
+      occurred_at,
+      fine_amount,
+    } = parsed.data;
 
-    const result = await pool.query(
-      `INSERT INTO violations (property_id, violation_type_id, description, due_date, status, created_by)
-       VALUES ($1, $2, $3, $4, 'open', $5)
+    const result = await db.query(
+      `INSERT INTO violations (property_id, violation_type_id, description, occurred_at, fine_amount, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'open', NOW(), NOW())
        RETURNING *`,
       [
         property_id,
         violation_type_id,
         description,
-        due_date || null,
-        (session.user as any).id,
+        occurred_at || new Date().toISOString(),
+        fine_amount || 0,
       ],
     );
 
     const violation = result.rows[0];
 
-    // Get property and owner info for email
-    try {
-      const propResult = await pool.query(
-        `SELECT p.address, u.email as owner_email
-         FROM properties p
-         LEFT JOIN users u ON p.owner_id = u.id
-         WHERE p.id = $1`,
-        [property_id],
-      );
+    // Send email notification if configured
+    if (process.env.RESEND_API_KEY) {
+      try {
+        const { Resend } = await import("resend");
+        const resend = new Resend(process.env.RESEND_API_KEY);
 
-      if (propResult.rows[0]?.owner_email) {
-        await sendViolationEmail({
-          to: propResult.rows[0].owner_email,
-          violationId: violation.id,
-          address: propResult.rows[0].address,
-          description,
-          status: "open",
-        });
+        const propertyResult = await db.query(
+          "SELECT * FROM properties WHERE id = $1",
+          [property_id],
+        );
+        const property = propertyResult.rows[0];
+
+        if (property?.owner_email) {
+          await resend.emails.send({
+            from: process.env.FROM_EMAIL || "noreply@example.com",
+            to: property.owner_email,
+            subject: "HOA Violation Notice",
+            html: `<p>Dear ${property.owner_name},</p><p>A violation has been recorded for your property at ${property.address}.</p><p>Description: ${description}</p>`,
+          });
+        }
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
       }
-    } catch (emailError) {
-      console.error("Email error:", emailError);
     }
 
     return NextResponse.json(violation, { status: 201 });
   } catch (error) {
-    console.error("POST /api/violations error:", error);
+    console.error("Error creating violation:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
