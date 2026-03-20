@@ -9,197 +9,183 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const idSchema = z.string().uuid();
+const PatchSchema = z.object({
+  status: z.enum(["open", "in_review", "resolved", "closed", "dismissed"]),
+  notes: z.string().optional(),
+});
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  const session = await getServerSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = params;
+
+  if (!id || isNaN(Number(id))) {
+    return NextResponse.json(
+      { error: "Invalid violation ID" },
+      { status: 400 },
+    );
+  }
+
+  const client = await pool.connect();
   try {
-    const session = await getServerSession();
-    if (!session || !session.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const result = await client.query(
+      `
+      SELECT
+        v.*,
+        EXTRACT(DAY FROM (NOW() - v.created_at)) AS days_open,
+        v.base_fine * GREATEST(1, EXTRACT(DAY FROM (NOW() - v.created_at))) AS computed_fine,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', vsl.id,
+              'from_status', vsl.from_status,
+              'to_status', vsl.to_status,
+              'notes', vsl.notes,
+              'changed_by', vsl.changed_by,
+              'created_at', vsl.created_at
+            ) ORDER BY vsl.created_at DESC
+          ) FILTER (WHERE vsl.id IS NOT NULL),
+          '[]'
+        ) AS status_log
+      FROM violations v
+      LEFT JOIN violation_status_log vsl ON vsl.violation_id = v.id
+      WHERE v.id = $1
+      GROUP BY v.id
+      `,
+      [id],
+    );
 
-    const parseResult = idSchema.safeParse(params.id);
-    if (!parseResult.success) {
+    if (result.rows.length === 0) {
       return NextResponse.json(
-        { error: "Invalid violation ID format" },
-        { status: 400 },
+        { error: "Violation not found" },
+        { status: 404 },
       );
     }
 
-    const violationId = parseResult.data;
-    const client = await pool.connect();
+    const violation = result.rows[0];
 
-    try {
-      const violationQuery = await client.query(
-        `
-        SELECT
-          v.id AS violation_id,
-          v.code AS violation_code,
-          v.description AS violation_description,
-          v.status AS violation_status,
-          v.severity AS violation_severity,
-          v.created_at AS violation_created_at,
-          v.updated_at AS violation_updated_at,
-          v.notes AS violation_notes,
-
-          p.id AS property_id,
-          p.address AS property_address,
-          p.city AS property_city,
-          p.state AS property_state,
-          p.zip AS property_zip,
-          p.parcel_number AS property_parcel_number,
-          p.property_type AS property_type,
-          p.created_at AS property_created_at,
-
-          o.id AS owner_id,
-          o.first_name AS owner_first_name,
-          o.last_name AS owner_last_name,
-          o.email AS owner_email,
-          o.phone AS owner_phone,
-          o.mailing_address AS owner_mailing_address,
-          o.created_at AS owner_created_at
-
-        FROM violations v
-        LEFT JOIN properties p ON v.property_id = p.id
-        LEFT JOIN owners o ON p.owner_id = o.id
-        WHERE v.id = $1
-        `,
-        [violationId],
-      );
-
-      if (violationQuery.rows.length === 0) {
-        return NextResponse.json(
-          { error: "Violation not found" },
-          { status: 404 },
-        );
-      }
-
-      const row = violationQuery.rows[0];
-
-      const inspectionsQuery = await client.query(
-        `
-        SELECT
-          id,
-          inspector_name,
-          inspection_date,
-          result,
-          notes,
-          follow_up_required,
-          follow_up_date,
-          created_at
-        FROM inspections
-        WHERE violation_id = $1
-        ORDER BY inspection_date DESC
-        `,
-        [violationId],
-      );
-
-      const finesQuery = await client.query(
-        `
-        SELECT
-          id,
-          amount,
-          issued_date,
-          due_date,
-          paid_date,
-          status,
-          payment_method,
-          notes,
-          created_at
-        FROM fines
-        WHERE violation_id = $1
-        ORDER BY issued_date DESC
-        `,
-        [violationId],
-      );
-
-      const hearingsQuery = await client.query(
-        `
-        SELECT
-          id,
-          hearing_date,
-          hearing_type,
-          location,
-          outcome,
-          officer_name,
-          notes,
-          continued_to,
-          created_at
-        FROM hearings
-        WHERE violation_id = $1
-        ORDER BY hearing_date DESC
-        `,
-        [violationId],
-      );
-
-      const auditQuery = await client.query(
-        `
-        SELECT
-          id,
-          action,
-          performed_by,
-          performed_at,
-          old_values,
-          new_values,
-          ip_address,
-          notes
-        FROM audit_entries
-        WHERE violation_id = $1
-        ORDER BY performed_at DESC
-        `,
-        [violationId],
-      );
-
-      const violation = {
-        id: row.violation_id,
-        code: row.violation_code,
-        description: row.violation_description,
-        status: row.violation_status,
-        severity: row.violation_severity,
-        notes: row.violation_notes,
-        created_at: row.violation_created_at,
-        updated_at: row.violation_updated_at,
-        property: row.property_id
-          ? {
-              id: row.property_id,
-              address: row.property_address,
-              city: row.property_city,
-              state: row.property_state,
-              zip: row.property_zip,
-              parcel_number: row.property_parcel_number,
-              property_type: row.property_type,
-              created_at: row.property_created_at,
-              owner: row.owner_id
-                ? {
-                    id: row.owner_id,
-                    first_name: row.owner_first_name,
-                    last_name: row.owner_last_name,
-                    email: row.owner_email,
-                    phone: row.owner_phone,
-                    mailing_address: row.owner_mailing_address,
-                    created_at: row.owner_created_at,
-                  }
-                : null,
-            }
-          : null,
-        inspections: inspectionsQuery.rows,
-        fines: finesQuery.rows,
-        hearings: hearingsQuery.rows,
-        audit_entries: auditQuery.rows,
-      };
-
-      return NextResponse.json({ data: violation }, { status: 200 });
-    } finally {
-      client.release();
-    }
+    return NextResponse.json({ data: violation }, { status: 200 });
   } catch (error) {
-    console.error("Error fetching violation detail:", error);
+    console.error("GET /api/violations/[id] error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
     );
+  } finally {
+    client.release();
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const session = await getServerSession();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = params;
+
+  if (!id || isNaN(Number(id))) {
+    return NextResponse.json(
+      { error: "Invalid violation ID" },
+      { status: 400 },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parseResult = PatchSchema.safeParse(body);
+  if (!parseResult.success) {
+    return NextResponse.json(
+      { error: "Validation failed", details: parseResult.error.flatten() },
+      { status: 422 },
+    );
+  }
+
+  const { status: newStatus, notes } = parseResult.data;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const violationResult = await client.query(
+      "SELECT id, status FROM violations WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+
+    if (violationResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Violation not found" },
+        { status: 404 },
+      );
+    }
+
+    const currentViolation = violationResult.rows[0];
+    const fromStatus = currentViolation.status;
+
+    if (fromStatus === newStatus) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Status is already set to the requested value" },
+        { status: 409 },
+      );
+    }
+
+    await client.query(
+      "UPDATE violations SET status = $1, updated_at = NOW() WHERE id = $2",
+      [newStatus, id],
+    );
+
+    const changedBy =
+      (session.user as { id?: string; email?: string })?.id ||
+      session.user?.email ||
+      "unknown";
+
+    await client.query(
+      `
+      INSERT INTO violation_status_log (violation_id, from_status, to_status, notes, changed_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      `,
+      [id, fromStatus, newStatus, notes ?? null, changedBy],
+    );
+
+    await client.query("COMMIT");
+
+    const updatedResult = await client.query(
+      `
+      SELECT
+        v.*,
+        EXTRACT(DAY FROM (NOW() - v.created_at)) AS days_open,
+        v.base_fine * GREATEST(1, EXTRACT(DAY FROM (NOW() - v.created_at))) AS computed_fine
+      FROM violations v
+      WHERE v.id = $1
+      `,
+      [id],
+    );
+
+    return NextResponse.json({ data: updatedResult.rows[0] }, { status: 200 });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("PATCH /api/violations/[id] error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  } finally {
+    client.release();
   }
 }
