@@ -1,27 +1,15 @@
-import {
-  NextAuthOptions,
-  getServerSession as nextAuthGetServerSession,
-} from "next-auth";
+import { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
+import { compare } from "bcryptjs";
 import { Pool } from "pg";
-import bcrypt from "bcryptjs";
-import { z } from "zod";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: "jwt",
-  },
-  pages: {
-    signIn: "/login",
   },
   providers: [
     CredentialsProvider({
@@ -31,34 +19,37 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
-        const parsed = loginSchema.safeParse(credentials);
-        if (!parsed.success) {
-          return null;
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error("Email and password are required");
         }
-
-        const { email, password } = parsed.data;
 
         const client = await pool.connect();
         try {
           const result = await client.query(
-            "SELECT id, email, name, password_hash FROM users WHERE email = $1 LIMIT 1",
-            [email],
+            "SELECT id, email, role, community_id, password_hash FROM users WHERE email = $1",
+            [credentials.email],
           );
 
           const user = result.rows[0];
+
           if (!user) {
-            return null;
+            throw new Error("No user found with this email");
           }
 
-          const isValid = await bcrypt.compare(password, user.password_hash);
-          if (!isValid) {
-            return null;
+          const isPasswordValid = await compare(
+            credentials.password,
+            user.password_hash,
+          );
+
+          if (!isPasswordValid) {
+            throw new Error("Invalid password");
           }
 
           return {
             id: String(user.id),
             email: user.email,
-            name: user.name ?? null,
+            role: user.role,
+            community_id: user.community_id,
           };
         } finally {
           client.release();
@@ -71,21 +62,24 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         token.id = user.id;
         token.email = user.email;
-        token.name = user.name;
+        token.role = (user as any).role;
+        token.community_id = (user as any).community_id;
       }
       return token;
     },
     async session({ session, token }) {
-      if (token && session.user) {
+      if (token) {
         session.user.id = token.id as string;
         session.user.email = token.email as string;
-        session.user.name = token.name as string | null;
+        (session.user as any).role = token.role;
+        (session.user as any).community_id = token.community_id;
       }
       return session;
     },
   },
+  pages: {
+    signIn: "/login",
+    error: "/login",
+  },
+  secret: process.env.NEXTAUTH_SECRET,
 };
-
-export async function getServerSession() {
-  return nextAuthGetServerSession(authOptions);
-}

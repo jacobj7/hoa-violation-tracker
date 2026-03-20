@@ -18,8 +18,8 @@ interface SummaryCard {
 }
 
 interface PageClientProps {
-  statusCounts: StatusCounts;
-  summaryCards: SummaryCard[];
+  statusCounts?: StatusCounts;
+  summaryCards?: SummaryCard[];
 }
 
 const colorClasses = {

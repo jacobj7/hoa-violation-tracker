@@ -4,17 +4,14 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-export { pool };
-
-export async function query<T = any>(
-  sql: string,
-  params: any[] = [],
-): Promise<T[]> {
+async function query(sql: string, params: unknown[] = []) {
   const client = await pool.connect();
   try {
     const result = await client.query(sql, params);
-    return result.rows as T[];
+    return result;
   } finally {
     client.release();
   }
 }
+
+export { pool, query };
