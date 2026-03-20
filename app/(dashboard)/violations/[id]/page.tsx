@@ -1,104 +1,77 @@
-import { notFound } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { redirect, notFound } from "next/navigation";
 import { db } from "@/lib/db";
-import ViolationDetailClient from "./ViolationDetailClient";
+import ViolationStatusBadge from "@/components/ViolationStatusBadge";
+import Link from "next/link";
 
-interface PageProps {
-  params: {
-    id: string;
-  };
-}
-
-async function getViolation(id: string, userId: string) {
-  const result = await db.query(
-    `SELECT 
-      v.id,
-      v.title,
-      v.description,
-      v.severity,
-      v.status,
-      v.location,
-      v.detected_at,
-      v.resolved_at,
-      v.created_at,
-      v.updated_at,
-      v.user_id,
-      v.metadata,
-      u.name as reporter_name,
-      u.email as reporter_email
-    FROM violations v
-    LEFT JOIN users u ON v.user_id = u.id
-    WHERE v.id = $1 AND v.user_id = $2`,
-    [id, userId],
-  );
-
-  return result.rows[0] || null;
-}
-
-async function getViolationComments(violationId: string) {
-  const result = await db.query(
-    `SELECT 
-      c.id,
-      c.content,
-      c.created_at,
-      c.updated_at,
-      u.name as author_name,
-      u.email as author_email
-    FROM violation_comments c
-    LEFT JOIN users u ON c.user_id = u.id
-    WHERE c.violation_id = $1
-    ORDER BY c.created_at ASC`,
-    [violationId],
-  );
-
-  return result.rows;
-}
-
-async function getViolationHistory(violationId: string) {
-  const result = await db.query(
-    `SELECT 
-      h.id,
-      h.action,
-      h.old_value,
-      h.new_value,
-      h.created_at,
-      u.name as actor_name,
-      u.email as actor_email
-    FROM violation_history h
-    LEFT JOIN users u ON h.user_id = u.id
-    WHERE h.violation_id = $1
-    ORDER BY h.created_at DESC`,
-    [violationId],
-  );
-
-  return result.rows;
-}
-
-export default async function ViolationDetailPage({ params }: PageProps) {
+export default async function ViolationDetailPage({
+  params,
+}: {
+  params: { id: string };
+}) {
   const session = await getServerSession(authOptions);
+  if (!session) redirect("/login");
 
-  if (!session?.user?.id) {
-    notFound();
+  let violation: Record<string, unknown> | null = null;
+  try {
+    const result = await db.query(
+      `SELECT v.*, p.address, u.name as owner_name, i.name as inspector_name
+       FROM violations v
+       LEFT JOIN properties p ON v.property_id = p.id
+       LEFT JOIN users u ON p.owner_id = u.id
+       LEFT JOIN users i ON v.inspector_id = i.id
+       WHERE v.id = $1`,
+      [params.id],
+    );
+    violation = result.rows[0] || null;
+  } catch (e) {
+    console.error("Error fetching violation:", e);
   }
 
-  const violation = await getViolation(params.id, session.user.id);
-
-  if (!violation) {
-    notFound();
-  }
-
-  const [comments, history] = await Promise.all([
-    getViolationComments(params.id),
-    getViolationHistory(params.id),
-  ]);
+  if (!violation) notFound();
 
   return (
-    <ViolationDetailClient
-      violation={violation}
-      comments={comments}
-      history={history}
-      currentUserId={session.user.id}
-    />
+    <div className="p-6 max-w-4xl mx-auto">
+      <div className="mb-4">
+        <Link href="/violations" className="text-blue-600 hover:text-blue-800">
+          &larr; Back to Violations
+        </Link>
+      </div>
+      <div className="bg-white rounded-lg shadow p-6">
+        <div className="flex justify-between items-start mb-6">
+          <h1 className="text-2xl font-bold">Violation Details</h1>
+          <ViolationStatusBadge status={String(violation.status || "")} />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <p className="text-sm text-gray-500">Property</p>
+            <p className="font-medium">{String(violation.address || "")}</p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Owner</p>
+            <p className="font-medium">{String(violation.owner_name || "")}</p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Inspector</p>
+            <p className="font-medium">
+              {String(violation.inspector_name || "")}
+            </p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Date</p>
+            <p className="font-medium">
+              {violation.created_at
+                ? new Date(String(violation.created_at)).toLocaleDateString()
+                : ""}
+            </p>
+          </div>
+          <div className="col-span-2">
+            <p className="text-sm text-gray-500">Description</p>
+            <p className="font-medium">{String(violation.description || "")}</p>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

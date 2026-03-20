@@ -9,11 +9,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const AppealSchema = z.object({
-  reason: z
-    .string()
-    .min(10, "Appeal reason must be at least 10 characters")
-    .max(2000),
+const appealSchema = z.object({
+  reason: z.string().min(10, "Appeal reason must be at least 10 characters"),
+  additional_info: z.string().optional(),
 });
 
 export async function POST(
@@ -23,7 +21,7 @@ export async function POST(
   try {
     const session = await getServerSession();
 
-    if (!session || !session.user?.email) {
+    if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -37,16 +35,19 @@ export async function POST(
     }
 
     const body = await request.json();
-    const validationResult = AppealSchema.safeParse(body);
+    const validationResult = appealSchema.safeParse(body);
 
     if (!validationResult.success) {
       return NextResponse.json(
-        { error: "Validation failed", details: validationResult.error.errors },
-        { status: 400 },
+        {
+          error: "Validation failed",
+          details: validationResult.error.flatten(),
+        },
+        { status: 422 },
       );
     }
 
-    const { reason } = validationResult.data;
+    const { reason, additional_info } = validationResult.data;
 
     const client = await pool.connect();
 
@@ -54,10 +55,7 @@ export async function POST(
       await client.query("BEGIN");
 
       const violationResult = await client.query(
-        `SELECT v.*, u.email as owner_email, u.id as owner_id
-         FROM violations v
-         LEFT JOIN users u ON v.owner_id = u.id
-         WHERE v.id = $1`,
+        "SELECT id, status, user_id FROM violations WHERE id = $1",
         [violationId],
       );
 
@@ -71,14 +69,6 @@ export async function POST(
 
       const violation = violationResult.rows[0];
 
-      if (violation.owner_email !== session.user.email) {
-        await client.query("ROLLBACK");
-        return NextResponse.json(
-          { error: "Forbidden: You are not the owner of this violation" },
-          { status: 403 },
-        );
-      }
-
       if (violation.status === "appealed") {
         await client.query("ROLLBACK");
         return NextResponse.json(
@@ -87,42 +77,35 @@ export async function POST(
         );
       }
 
-      if (violation.status === "resolved" || violation.status === "dismissed") {
+      if (violation.status === "resolved") {
         await client.query("ROLLBACK");
         return NextResponse.json(
-          {
-            error:
-              "Cannot appeal a violation that is already resolved or dismissed",
-          },
+          { error: "Cannot appeal a resolved violation" },
           { status: 400 },
         );
       }
 
+      const userEmail = session.user.email;
+      const userResult = await client.query(
+        "SELECT id FROM users WHERE email = $1",
+        [userEmail],
+      );
+
+      let userId: number | null = null;
+      if (userResult.rows.length > 0) {
+        userId = userResult.rows[0].id;
+      }
+
       const appealResult = await client.query(
-        `INSERT INTO appeals (violation_id, owner_id, reason, status, created_at, updated_at)
-         VALUES ($1, $2, $3, 'pending', NOW(), NOW())
-         RETURNING *`,
-        [violationId, violation.owner_id, reason],
+        `INSERT INTO appeals (violation_id, user_id, reason, additional_info, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'pending', NOW(), NOW())
+         RETURNING id, violation_id, reason, additional_info, status, created_at`,
+        [violationId, userId, reason, additional_info || null],
       );
 
-      const appeal = appealResult.rows[0];
-
-      const previousStatus = violation.status;
-
       await client.query(
-        `UPDATE violations SET status = 'appealed', updated_at = NOW() WHERE id = $1`,
+        "UPDATE violations SET status = 'appealed', updated_at = NOW() WHERE id = $1",
         [violationId],
-      );
-
-      await client.query(
-        `INSERT INTO violation_status_log (violation_id, previous_status, new_status, changed_by, change_reason, created_at)
-         VALUES ($1, $2, 'appealed', $3, $4, NOW())`,
-        [
-          violationId,
-          previousStatus,
-          session.user.email,
-          `Appeal submitted: ${reason.substring(0, 100)}${reason.length > 100 ? "..." : ""}`,
-        ],
       );
 
       await client.query("COMMIT");
@@ -130,14 +113,7 @@ export async function POST(
       return NextResponse.json(
         {
           message: "Appeal submitted successfully",
-          appeal: {
-            id: appeal.id,
-            violation_id: appeal.violation_id,
-            reason: appeal.reason,
-            status: appeal.status,
-            created_at: appeal.created_at,
-          },
-          violation_status: "appealed",
+          appeal: appealResult.rows[0],
         },
         { status: 201 },
       );
@@ -149,14 +125,6 @@ export async function POST(
     }
   } catch (error) {
     console.error("Error submitting appeal:", error);
-
-    if (error instanceof SyntaxError) {
-      return NextResponse.json(
-        { error: "Invalid JSON in request body" },
-        { status: 400 },
-      );
-    }
-
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

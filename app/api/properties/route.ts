@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
 import { z } from "zod";
 import { Pool } from "pg";
 
@@ -8,108 +9,110 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const createPropertySchema = z.object({
-  address: z.string().min(1, "Address is required"),
-  owner_id: z.string().uuid("Invalid owner ID"),
-  community_id: z.string().uuid("Invalid community ID"),
+const querySchema = z.object({
+  community_id: z.string().uuid().optional(),
+  owner_id: z.string().uuid().optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
 export async function GET(request: NextRequest) {
   try {
+    const session = await getServerSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { searchParams } = new URL(request.url);
-    const community_id = searchParams.get("community_id");
+    const parseResult = querySchema.safeParse({
+      community_id: searchParams.get("community_id") ?? undefined,
+      owner_id: searchParams.get("owner_id") ?? undefined,
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
+    });
 
-    let query: string;
-    let params: string[];
-
-    if (community_id) {
-      const parsed = z.string().uuid().safeParse(community_id);
-      if (!parsed.success) {
-        return NextResponse.json(
-          { error: "Invalid community_id format" },
-          { status: 400 },
-        );
-      }
-      query = `
-        SELECT 
-          p.id,
-          p.address,
-          p.owner_id,
-          p.community_id,
-          p.created_at,
-          p.updated_at
-        FROM properties p
-        WHERE p.community_id = $1
-        ORDER BY p.created_at DESC
-      `;
-      params = [community_id];
-    } else {
-      query = `
-        SELECT 
-          p.id,
-          p.address,
-          p.owner_id,
-          p.community_id,
-          p.created_at,
-          p.updated_at
-        FROM properties p
-        ORDER BY p.created_at DESC
-      `;
-      params = [];
-    }
-
-    const client = await pool.connect();
-    try {
-      const result = await client.query(query, params);
-      return NextResponse.json({ properties: result.rows }, { status: 200 });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error("GET /api/properties error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 },
-    );
-  }
-}
-
-export async function POST(request: NextRequest) {
-  try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
-
-    const parsed = createPropertySchema.safeParse(body);
-    if (!parsed.success) {
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Validation failed", details: parsed.error.flatten() },
+        {
+          error: "Invalid query parameters",
+          details: parseResult.error.flatten(),
+        },
         { status: 400 },
       );
     }
 
-    const { address, owner_id, community_id } = parsed.data;
+    const { community_id, owner_id, page, limit } = parseResult.data;
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
+
+    if (community_id) {
+      conditions.push(`p.community_id = $${paramIndex++}`);
+      values.push(community_id);
+    }
+
+    if (owner_id) {
+      conditions.push(`p.owner_id = $${paramIndex++}`);
+      values.push(owner_id);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const countQuery = `
+      SELECT COUNT(*) AS total
+      FROM properties p
+      ${whereClause}
+    `;
+
+    const dataQuery = `
+      SELECT
+        p.id,
+        p.community_id,
+        p.owner_id,
+        p.address,
+        p.unit_number,
+        p.property_type,
+        p.status,
+        p.created_at,
+        p.updated_at
+      FROM properties p
+      ${whereClause}
+      ORDER BY p.created_at DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `;
+
+    const countValues = [...values];
+    const dataValues = [...values, limit, offset];
 
     const client = await pool.connect();
     try {
-      const result = await client.query(
-        `
-        INSERT INTO properties (address, owner_id, community_id, created_at, updated_at)
-        VALUES ($1, $2, $3, NOW(), NOW())
-        RETURNING id, address, owner_id, community_id, created_at, updated_at
-        `,
-        [address, owner_id, community_id],
-      );
+      const [countResult, dataResult] = await Promise.all([
+        client.query(countQuery, countValues),
+        client.query(dataQuery, dataValues),
+      ]);
 
-      return NextResponse.json({ property: result.rows[0] }, { status: 201 });
+      const total = parseInt(countResult.rows[0].total, 10);
+      const totalPages = Math.ceil(total / limit);
+
+      return NextResponse.json({
+        data: dataResult.rows,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
+        },
+      });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error("POST /api/properties error:", error);
+    console.error("Error fetching properties:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
