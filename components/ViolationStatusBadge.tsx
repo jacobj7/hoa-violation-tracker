@@ -2,16 +2,16 @@
 
 import React from "react";
 
-type ViolationStatus =
+export type ViolationStatus =
   | "open"
-  | "under_inspection"
+  | "notified"
   | "fined"
-  | "hearing_scheduled"
+  | "appealed"
   | "resolved"
   | "closed";
 
 interface ViolationStatusBadgeProps {
-  status: ViolationStatus | string;
+  status: ViolationStatus;
   className?: string;
 }
 
@@ -21,27 +21,27 @@ const statusConfig: Record<
 > = {
   open: {
     label: "Open",
-    bgColor: "bg-yellow-100",
-    textColor: "text-yellow-800",
-    borderColor: "border-yellow-300",
-  },
-  under_inspection: {
-    label: "Under Inspection",
-    bgColor: "bg-blue-100",
-    textColor: "text-blue-800",
-    borderColor: "border-blue-300",
-  },
-  fined: {
-    label: "Fined",
     bgColor: "bg-red-100",
     textColor: "text-red-800",
     borderColor: "border-red-300",
   },
-  hearing_scheduled: {
-    label: "Hearing Scheduled",
-    bgColor: "bg-purple-100",
-    textColor: "text-purple-800",
-    borderColor: "border-purple-300",
+  notified: {
+    label: "Notified",
+    bgColor: "bg-yellow-100",
+    textColor: "text-yellow-800",
+    borderColor: "border-yellow-300",
+  },
+  fined: {
+    label: "Fined",
+    bgColor: "bg-orange-100",
+    textColor: "text-orange-800",
+    borderColor: "border-orange-300",
+  },
+  appealed: {
+    label: "Appealed",
+    bgColor: "bg-blue-100",
+    textColor: "text-blue-800",
+    borderColor: "border-blue-300",
   },
   resolved: {
     label: "Resolved",
@@ -52,33 +52,25 @@ const statusConfig: Record<
   closed: {
     label: "Closed",
     bgColor: "bg-gray-100",
-    textColor: "text-gray-700",
+    textColor: "text-gray-800",
     borderColor: "border-gray-300",
   },
 };
 
-const defaultConfig = {
-  label: "Unknown",
-  bgColor: "bg-gray-100",
-  textColor: "text-gray-600",
-  borderColor: "border-gray-200",
-};
-
-export default function ViolationStatusBadge({
+export function ViolationStatusBadge({
   status,
   className = "",
 }: ViolationStatusBadgeProps) {
-  const config = statusConfig[status as ViolationStatus] ?? {
-    ...defaultConfig,
-    label: status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-  };
+  const config = statusConfig[status] ?? statusConfig.closed;
 
   return (
     <span
       className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${config.bgColor} ${config.textColor} ${config.borderColor} ${className}`}
+      role="status"
+      aria-label={`Violation status: ${config.label}`}
     >
       <span
-        className={`w-1.5 h-1.5 rounded-full mr-1.5 ${config.textColor.replace("text-", "bg-")}`}
+        className={`w-1.5 h-1.5 rounded-full mr-1.5 ${config.textColor.replace("text-", "bg-").replace("-800", "-500")}`}
         aria-hidden="true"
       />
       {config.label}
@@ -86,4 +78,4 @@ export default function ViolationStatusBadge({
   );
 }
 
-export type { ViolationStatus, ViolationStatusBadgeProps };
+export default ViolationStatusBadge;

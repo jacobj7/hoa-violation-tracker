@@ -8,11 +8,9 @@ export async function GET() {
     const client = await pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, name, description, severity_level
-         FROM violation_categories
-         ORDER BY name ASC`,
+        "SELECT * FROM violation_categories ORDER BY name ASC",
       );
-      return NextResponse.json({ categories: result.rows });
+      return NextResponse.json(result.rows);
     } finally {
       client.release();
     }

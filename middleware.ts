@@ -1,26 +1,61 @@
-import { getToken } from "next-auth/jwt";
-import { NextRequest, NextResponse } from "next/server";
+import { withAuth } from "next-auth/middleware";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import type { JWT } from "next-auth/jwt";
 
-export async function middleware(request: NextRequest) {
-  const token = await getToken({
-    req: request,
-    secret: process.env.NEXTAUTH_SECRET,
-  });
-
-  const { pathname } = request.nextUrl;
-
-  const isProtectedRoute =
-    pathname.startsWith("/dashboard") || pathname.startsWith("/portal");
-
-  if (isProtectedRoute && !token) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("callbackUrl", encodeURI(request.url));
-    return NextResponse.redirect(loginUrl);
-  }
-
-  return NextResponse.next();
+interface ExtendedToken extends JWT {
+  role?: string;
 }
 
+export default withAuth(
+  function middleware(
+    req: NextRequest & { nextauth: { token: ExtendedToken } },
+  ) {
+    const { pathname } = req.nextUrl;
+    const token = req.nextauth.token;
+    const role = token?.role;
+
+    if (pathname.startsWith("/dashboard/inspector")) {
+      if (role !== "inspector") {
+        const url = req.nextUrl.clone();
+        url.pathname = "/dashboard";
+        url.searchParams.set("error", "unauthorized");
+        return NextResponse.redirect(url);
+      }
+    }
+
+    if (pathname.startsWith("/dashboard/board")) {
+      if (role !== "board") {
+        const url = req.nextUrl.clone();
+        url.pathname = "/dashboard";
+        url.searchParams.set("error", "unauthorized");
+        return NextResponse.redirect(url);
+      }
+    }
+
+    if (pathname.startsWith("/dashboard/owner")) {
+      if (role !== "owner") {
+        const url = req.nextUrl.clone();
+        url.pathname = "/dashboard";
+        url.searchParams.set("error", "unauthorized");
+        return NextResponse.redirect(url);
+      }
+    }
+
+    return NextResponse.next();
+  },
+  {
+    callbacks: {
+      authorized: ({ token }) => {
+        return !!token;
+      },
+    },
+    pages: {
+      signIn: "/login",
+    },
+  },
+);
+
 export const config = {
-  matcher: ["/dashboard/:path*", "/portal/:path*"],
+  matcher: ["/dashboard/:path*"],
 };

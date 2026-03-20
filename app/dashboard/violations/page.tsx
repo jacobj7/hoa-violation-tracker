@@ -1,96 +1,122 @@
-import { Suspense } from "react";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
-import ViolationsTable from "./ViolationsTable";
+import Link from "next/link";
+import ViolationStatusBadge from "@/components/ViolationStatusBadge";
 
-interface PageProps {
-  searchParams: {
-    page?: string;
-    status?: string;
-  };
-}
+export default async function ViolationsPage() {
+  const session = await getServerSession(authOptions);
+  if (!session) redirect("/login");
 
-async function getViolations(page: number, status?: string) {
-  const pageSize = 20;
-  const offset = (page - 1) * pageSize;
-
-  const conditions: string[] = [];
-  const values: (string | number)[] = [];
-  let paramIndex = 1;
-
-  if (status && status !== "all") {
-    conditions.push(`status = $${paramIndex}`);
-    values.push(status);
-    paramIndex++;
+  let violations: Record<string, unknown>[] = [];
+  try {
+    const role = session.user.role;
+    let result;
+    if (role === "board") {
+      result = await db.query(
+        `SELECT v.*, p.address, u.name as owner_name
+         FROM violations v
+         LEFT JOIN properties p ON v.property_id = p.id
+         LEFT JOIN users u ON p.owner_id = u.id
+         ORDER BY v.created_at DESC`,
+      );
+    } else if (role === "inspector") {
+      result = await db.query(
+        `SELECT v.*, p.address, u.name as owner_name
+         FROM violations v
+         LEFT JOIN properties p ON v.property_id = p.id
+         LEFT JOIN users u ON p.owner_id = u.id
+         WHERE v.inspector_id = $1
+         ORDER BY v.created_at DESC`,
+        [session.user.id],
+      );
+    } else {
+      result = await db.query(
+        `SELECT v.*, p.address
+         FROM violations v
+         LEFT JOIN properties p ON v.property_id = p.id
+         WHERE p.owner_id = $1
+         ORDER BY v.created_at DESC`,
+        [session.user.id],
+      );
+    }
+    violations = result.rows;
+  } catch (e) {
+    console.error("Error fetching violations:", e);
   }
 
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-  const countResult = await db.query(
-    `SELECT COUNT(*) as total FROM violations ${whereClause}`,
-    values,
-  );
-
-  const total = parseInt(countResult.rows[0].total, 10);
-
-  values.push(pageSize);
-  values.push(offset);
-
-  const result = await db.query(
-    `SELECT
-      v.id,
-      v.title,
-      v.description,
-      v.status,
-      v.severity,
-      v.created_at,
-      v.updated_at,
-      u.name as reported_by_name,
-      u.email as reported_by_email
-    FROM violations v
-    LEFT JOIN users u ON v.reported_by = u.id
-    ${whereClause}
-    ORDER BY v.created_at DESC
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-    values,
-  );
-
-  return {
-    violations: result.rows,
-    total,
-    pageSize,
-    totalPages: Math.ceil(total / pageSize),
-  };
-}
-
-export default async function ViolationsPage({ searchParams }: PageProps) {
-  const page = Math.max(1, parseInt(searchParams.page || "1", 10));
-  const status = searchParams.status;
-
-  const { violations, total, pageSize, totalPages } = await getViolations(
-    page,
-    status,
-  );
-
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Violations</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          {total} total violation{total !== 1 ? "s" : ""}
-        </p>
+    <div className="p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Violations</h1>
+        {session.user.role === "inspector" && (
+          <Link
+            href="/dashboard/violations/new"
+            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+          >
+            New Violation
+          </Link>
+        )}
       </div>
-
-      <Suspense fallback={<div className="animate-pulse">Loading...</div>}>
-        <ViolationsTable
-          violations={violations}
-          currentPage={page}
-          totalPages={totalPages}
-          pageSize={pageSize}
-          total={total}
-          currentStatus={status || "all"}
-        />
-      </Suspense>
+      <div className="bg-white rounded-lg shadow overflow-hidden">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                Property
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                Description
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                Status
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                Date
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                Actions
+              </th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {violations.map((v) => (
+              <tr key={String(v.id)}>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {String(v.address || "")}
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-900">
+                  {String(v.description || "").substring(0, 50)}
+                </td>
+                <td className="px-6 py-4">
+                  <ViolationStatusBadge status={String(v.status || "")} />
+                </td>
+                <td className="px-6 py-4 text-sm text-gray-500">
+                  {v.created_at
+                    ? new Date(String(v.created_at)).toLocaleDateString()
+                    : ""}
+                </td>
+                <td className="px-6 py-4 text-sm">
+                  <Link
+                    href={`/dashboard/violations/${v.id}`}
+                    className="text-blue-600 hover:text-blue-800"
+                  >
+                    View
+                  </Link>
+                </td>
+              </tr>
+            ))}
+            {violations.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-6 py-4 text-center text-gray-500">
+                  No violations found
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

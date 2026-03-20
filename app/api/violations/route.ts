@@ -9,38 +9,51 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const violationPostSchema = z.object({
+const createViolationSchema = z.object({
   property_id: z.number().int().positive(),
-  violation_type_id: z.number().int().positive(),
-  description: z.string().min(1).max(5000),
-  reported_by: z.string().min(1).max(255),
+  category_id: z.number().int().positive(),
+  community_id: z.number().int().positive(),
+  description: z.string().min(1).max(2000),
+  status: z
+    .enum(["open", "pending", "resolved", "closed"])
+    .optional()
+    .default("open"),
+  severity: z
+    .enum(["low", "medium", "high", "critical"])
+    .optional()
+    .default("medium"),
+  due_date: z.string().datetime().optional().nullable(),
+  notes: z.string().max(2000).optional().nullable(),
+  assigned_to: z.number().int().positive().optional().nullable(),
 });
 
-const violationGetSchema = z.object({
-  status: z.string().optional(),
-  property_id: z.string().optional(),
-  community_id: z.string().optional(),
-  page: z.string().optional(),
-  limit: z.string().optional(),
+const getViolationsQuerySchema = z.object({
+  status: z.enum(["open", "pending", "resolved", "closed"]).optional(),
+  property_id: z.coerce.number().int().positive().optional(),
+  category_id: z.coerce.number().int().positive().optional(),
+  community_id: z.coerce.number().int().positive().optional(),
+  page: z.coerce.number().int().positive().optional().default(1),
+  limit: z.coerce.number().int().positive().max(100).optional().default(20),
 });
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession();
-    if (!session) {
+    if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
-    const rawParams = {
+    const queryParams = {
       status: searchParams.get("status") ?? undefined,
       property_id: searchParams.get("property_id") ?? undefined,
+      category_id: searchParams.get("category_id") ?? undefined,
       community_id: searchParams.get("community_id") ?? undefined,
       page: searchParams.get("page") ?? undefined,
       limit: searchParams.get("limit") ?? undefined,
     };
 
-    const parsed = violationGetSchema.safeParse(rawParams);
+    const parsed = getViolationsQuerySchema.safeParse(queryParams);
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid query parameters", details: parsed.error.flatten() },
@@ -48,13 +61,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { status, property_id, community_id, page, limit } = parsed.data;
-
-    const pageNum = page ? Math.max(1, parseInt(page, 10)) : 1;
-    const limitNum = limit
-      ? Math.min(100, Math.max(1, parseInt(limit, 10)))
-      : 20;
-    const offset = (pageNum - 1) * limitNum;
+    const { status, property_id, category_id, community_id, page, limit } =
+      parsed.data;
+    const offset = (page - 1) * limit;
 
     const conditions: string[] = [];
     const values: (string | number)[] = [];
@@ -64,21 +73,17 @@ export async function GET(request: NextRequest) {
       conditions.push(`v.status = $${paramIndex++}`);
       values.push(status);
     }
-
     if (property_id) {
-      const pid = parseInt(property_id, 10);
-      if (!isNaN(pid)) {
-        conditions.push(`v.property_id = $${paramIndex++}`);
-        values.push(pid);
-      }
+      conditions.push(`v.property_id = $${paramIndex++}`);
+      values.push(property_id);
     }
-
+    if (category_id) {
+      conditions.push(`v.category_id = $${paramIndex++}`);
+      values.push(category_id);
+    }
     if (community_id) {
-      const cid = parseInt(community_id, 10);
-      if (!isNaN(cid)) {
-        conditions.push(`p.community_id = $${paramIndex++}`);
-        values.push(cid);
-      }
+      conditions.push(`v.community_id = $${paramIndex++}`);
+      values.push(community_id);
     }
 
     const whereClause =
@@ -87,7 +92,6 @@ export async function GET(request: NextRequest) {
     const countQuery = `
       SELECT COUNT(*) as total
       FROM violations v
-      LEFT JOIN properties p ON v.property_id = p.id
       ${whereClause}
     `;
 
@@ -95,43 +99,49 @@ export async function GET(request: NextRequest) {
       SELECT
         v.id,
         v.property_id,
-        v.violation_type_id,
+        v.category_id,
+        v.community_id,
         v.description,
-        v.reported_by,
         v.status,
+        v.severity,
+        v.due_date,
+        v.notes,
+        v.assigned_to,
         v.created_at,
         v.updated_at,
-        p.address AS property_address,
-        p.community_id,
-        vt.name AS violation_type_name
+        p.address as property_address,
+        vc.name as category_name,
+        c.name as community_name,
+        u.name as assigned_to_name
       FROM violations v
-      LEFT JOIN properties p ON v.property_id = p.id
-      LEFT JOIN violation_types vt ON v.violation_type_id = vt.id
+      LEFT JOIN properties p ON p.id = v.property_id
+      LEFT JOIN violation_categories vc ON vc.id = v.category_id
+      LEFT JOIN communities c ON c.id = v.community_id
+      LEFT JOIN users u ON u.id = v.assigned_to
       ${whereClause}
       ORDER BY v.created_at DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
 
-    const countValues = [...values];
-    const dataValues = [...values, limitNum, offset];
-
     const client = await pool.connect();
     try {
       const [countResult, dataResult] = await Promise.all([
-        client.query(countQuery, countValues),
-        client.query(dataQuery, dataValues),
+        client.query(countQuery, values),
+        client.query(dataQuery, [...values, limit, offset]),
       ]);
 
       const total = parseInt(countResult.rows[0].total, 10);
-      const totalPages = Math.ceil(total / limitNum);
+      const totalPages = Math.ceil(total / limit);
 
       return NextResponse.json({
         data: dataResult.rows,
         pagination: {
           total,
-          page: pageNum,
-          limit: limitNum,
+          page,
+          limit,
           totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
         },
       });
     } finally {
@@ -149,7 +159,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession();
-    if (!session) {
+    if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -160,7 +170,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const parsed = violationPostSchema.safeParse(body);
+    const parsed = createViolationSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Validation failed", details: parsed.error.flatten() },
@@ -168,41 +178,64 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { property_id, violation_type_id, description, reported_by } =
-      parsed.data;
+    const {
+      property_id,
+      category_id,
+      community_id,
+      description,
+      status,
+      severity,
+      due_date,
+      notes,
+      assigned_to,
+    } = parsed.data;
 
     const client = await pool.connect();
     try {
-      const propertyCheck = await client.query(
-        "SELECT id FROM properties WHERE id = $1",
-        [property_id],
+      const result = await client.query(
+        `INSERT INTO violations (
+          property_id,
+          category_id,
+          community_id,
+          description,
+          status,
+          severity,
+          due_date,
+          notes,
+          assigned_to,
+          created_at,
+          updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          NOW(), NOW()
+        )
+        RETURNING
+          id,
+          property_id,
+          category_id,
+          community_id,
+          description,
+          status,
+          severity,
+          due_date,
+          notes,
+          assigned_to,
+          created_at,
+          updated_at`,
+        [
+          property_id,
+          category_id,
+          community_id,
+          description,
+          status,
+          severity,
+          due_date ?? null,
+          notes ?? null,
+          assigned_to ?? null,
+        ],
       );
-      if (propertyCheck.rows.length === 0) {
-        return NextResponse.json(
-          { error: "Property not found" },
-          { status: 404 },
-        );
-      }
 
-      const violationTypeCheck = await client.query(
-        "SELECT id FROM violation_types WHERE id = $1",
-        [violation_type_id],
-      );
-      if (violationTypeCheck.rows.length === 0) {
-        return NextResponse.json(
-          { error: "Violation type not found" },
-          { status: 404 },
-        );
-      }
-
-      const insertResult = await client.query(
-        `INSERT INTO violations (property_id, violation_type_id, description, reported_by, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'open', NOW(), NOW())
-         RETURNING *`,
-        [property_id, violation_type_id, description, reported_by],
-      );
-
-      return NextResponse.json({ data: insertResult.rows[0] }, { status: 201 });
+      return NextResponse.json({ data: result.rows[0] }, { status: 201 });
     } finally {
       client.release();
     }
