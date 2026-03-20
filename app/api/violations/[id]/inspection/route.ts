@@ -9,10 +9,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const FineSchema = z.object({
-  amount: z.number().positive("Amount must be positive"),
-  currency: z.string().min(1).max(10).default("USD"),
-  due_date: z.string().datetime().optional(),
+const assignInspectorSchema = z.object({
+  inspector_id: z.string().uuid("Invalid inspector ID"),
+  scheduled_date: z.string().datetime("Invalid scheduled date"),
   notes: z.string().max(1000).optional(),
 });
 
@@ -28,9 +27,9 @@ export async function POST(
 
   const violationId = params.id;
 
-  if (!violationId || isNaN(Number(violationId))) {
+  if (!violationId) {
     return NextResponse.json(
-      { error: "Invalid violation ID" },
+      { error: "Violation ID is required" },
       { status: 400 },
     );
   }
@@ -42,15 +41,19 @@ export async function POST(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const parseResult = FineSchema.safeParse(body);
+  const parseResult = assignInspectorSchema.safeParse(body);
+
   if (!parseResult.success) {
     return NextResponse.json(
-      { error: "Validation failed", details: parseResult.error.flatten() },
+      {
+        error: "Validation failed",
+        details: parseResult.error.flatten(),
+      },
       { status: 422 },
     );
   }
 
-  const { amount, currency, due_date, notes } = parseResult.data;
+  const { inspector_id, scheduled_date, notes } = parseResult.data;
 
   const client = await pool.connect();
 
@@ -72,50 +75,55 @@ export async function POST(
 
     const violation = violationResult.rows[0];
 
-    if (violation.status === "fined") {
+    if (violation.status === "closed" || violation.status === "resolved") {
       await client.query("ROLLBACK");
       return NextResponse.json(
-        { error: "Violation has already been fined" },
+        {
+          error: `Cannot assign inspector to a violation with status '${violation.status}'`,
+        },
         { status: 409 },
       );
     }
 
-    const fineResult = await client.query(
-      `INSERT INTO fines (violation_id, amount, currency, due_date, notes, issued_by, issued_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())
-       RETURNING *`,
-      [
-        violationId,
-        amount,
-        currency,
-        due_date ? new Date(due_date) : null,
-        notes || null,
-        session.user.email || session.user.name || "unknown",
-      ],
+    const inspectorResult = await client.query(
+      `SELECT id FROM users WHERE id = $1`,
+      [inspector_id],
     );
 
-    const fine = fineResult.rows[0];
+    if (inspectorResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Inspector not found" },
+        { status: 404 },
+      );
+    }
+
+    const inspectionResult = await client.query(
+      `INSERT INTO inspections (violation_id, inspector_id, scheduled_date, notes, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'scheduled', NOW(), NOW())
+       RETURNING *`,
+      [violationId, inspector_id, scheduled_date, notes ?? null],
+    );
+
+    const inspection = inspectionResult.rows[0];
 
     await client.query(
-      `UPDATE violations SET status = 'fined', updated_at = NOW() WHERE id = $1`,
+      `UPDATE violations SET status = 'under_inspection', updated_at = NOW() WHERE id = $1`,
       [violationId],
     );
 
     await client.query(
-      `INSERT INTO audit_log (entity_type, entity_id, action, actor, metadata, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      `INSERT INTO audit_logs (entity_type, entity_id, action, performed_by, details, created_at)
+       VALUES ('violation', $1, 'inspection_assigned', $2, $3, NOW())`,
       [
-        "violation",
         violationId,
-        "fine_issued",
-        session.user.email || session.user.name || "unknown",
+        session.user.email ?? session.user.name ?? "unknown",
         JSON.stringify({
-          fine_id: fine.id,
-          amount,
-          currency,
-          due_date: due_date || null,
-          notes: notes || null,
+          inspection_id: inspection.id,
+          inspector_id,
+          scheduled_date,
           previous_status: violation.status,
+          new_status: "under_inspection",
         }),
       ],
     );
@@ -124,16 +132,15 @@ export async function POST(
 
     return NextResponse.json(
       {
-        message: "Fine issued successfully",
-        fine,
-        violation_id: violationId,
-        violation_status: "fined",
+        message: "Inspector assigned successfully",
+        inspection,
+        violation_status: "under_inspection",
       },
       { status: 201 },
     );
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("Error issuing fine:", error);
+    console.error("Error assigning inspector to violation:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
