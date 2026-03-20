@@ -1,95 +1,96 @@
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { redirect } from "next/navigation";
-import { Pool } from "pg";
-import ViolationsClient from "./ViolationsClient";
+import { Suspense } from "react";
+import { db } from "@/lib/db";
+import ViolationsTable from "./ViolationsTable";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-export interface Violation {
-  id: string;
-  title: string;
-  description: string;
-  severity: string;
-  status: string;
-  location: string | null;
-  reported_by: string | null;
-  assigned_to: string | null;
-  created_at: string;
-  updated_at: string;
-  reporter_name: string | null;
-  assignee_name: string | null;
+interface PageProps {
+  searchParams: {
+    page?: string;
+    status?: string;
+  };
 }
 
-async function getViolations(userId: string): Promise<Violation[]> {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(
-      `SELECT 
-        v.id,
-        v.title,
-        v.description,
-        v.severity,
-        v.status,
-        v.location,
-        v.reported_by,
-        v.assigned_to,
-        v.created_at,
-        v.updated_at,
-        reporter.name AS reporter_name,
-        assignee.name AS assignee_name
-      FROM violations v
-      LEFT JOIN users reporter ON v.reported_by = reporter.id
-      LEFT JOIN users assignee ON v.assigned_to = assignee.id
-      ORDER BY v.created_at DESC`,
-      [],
-    );
+async function getViolations(page: number, status?: string) {
+  const pageSize = 20;
+  const offset = (page - 1) * pageSize;
 
-    return result.rows.map((row) => ({
-      id: String(row.id),
-      title: String(row.title),
-      description: String(row.description),
-      severity: String(row.severity),
-      status: String(row.status),
-      location: row.location ? String(row.location) : null,
-      reported_by: row.reported_by ? String(row.reported_by) : null,
-      assigned_to: row.assigned_to ? String(row.assigned_to) : null,
-      created_at:
-        row.created_at instanceof Date
-          ? row.created_at.toISOString()
-          : String(row.created_at),
-      updated_at:
-        row.updated_at instanceof Date
-          ? row.updated_at.toISOString()
-          : String(row.updated_at),
-      reporter_name: row.reporter_name ? String(row.reporter_name) : null,
-      assignee_name: row.assignee_name ? String(row.assignee_name) : null,
-    }));
-  } finally {
-    client.release();
+  const conditions: string[] = [];
+  const values: (string | number)[] = [];
+  let paramIndex = 1;
+
+  if (status && status !== "all") {
+    conditions.push(`status = $${paramIndex}`);
+    values.push(status);
+    paramIndex++;
   }
+
+  const whereClause =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const countResult = await db.query(
+    `SELECT COUNT(*) as total FROM violations ${whereClause}`,
+    values,
+  );
+
+  const total = parseInt(countResult.rows[0].total, 10);
+
+  values.push(pageSize);
+  values.push(offset);
+
+  const result = await db.query(
+    `SELECT
+      v.id,
+      v.title,
+      v.description,
+      v.status,
+      v.severity,
+      v.created_at,
+      v.updated_at,
+      u.name as reported_by_name,
+      u.email as reported_by_email
+    FROM violations v
+    LEFT JOIN users u ON v.reported_by = u.id
+    ${whereClause}
+    ORDER BY v.created_at DESC
+    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+    values,
+  );
+
+  return {
+    violations: result.rows,
+    total,
+    pageSize,
+    totalPages: Math.ceil(total / pageSize),
+  };
 }
 
-export default async function ViolationsPage() {
-  const session = await getServerSession(authOptions);
+export default async function ViolationsPage({ searchParams }: PageProps) {
+  const page = Math.max(1, parseInt(searchParams.page || "1", 10));
+  const status = searchParams.status;
 
-  if (!session || !session.user) {
-    redirect("/login");
-  }
-
-  const violations = await getViolations(session.user.id as string);
+  const { violations, total, pageSize, totalPages } = await getViolations(
+    page,
+    status,
+  );
 
   return (
     <div className="container mx-auto px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900">Violations</h1>
-        <p className="mt-2 text-gray-600">
-          Manage and track all reported violations
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Violations</h1>
+        <p className="mt-1 text-sm text-gray-500">
+          {total} total violation{total !== 1 ? "s" : ""}
         </p>
       </div>
-      <ViolationsClient violations={violations} />
+
+      <Suspense fallback={<div className="animate-pulse">Loading...</div>}>
+        <ViolationsTable
+          violations={violations}
+          currentPage={page}
+          totalPages={totalPages}
+          pageSize={pageSize}
+          total={total}
+          currentStatus={status || "all"}
+        />
+      </Suspense>
     </div>
   );
 }

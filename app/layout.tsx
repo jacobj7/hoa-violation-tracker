@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import Providers from "../components/Providers";
+import { Providers } from "@/components/Providers";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "HOA Violation Management",
-  description: "Manage HOA violations, fines, and hearings",
+  title: "AI App",
+  description: "AI-powered application",
 };
 
 export default function RootLayout({
@@ -17,7 +17,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={inter.className}>
+      <body
+        className={`${inter.className} antialiased bg-gray-50 text-gray-900`}
+      >
         <Providers>{children}</Providers>
       </body>
     </html>

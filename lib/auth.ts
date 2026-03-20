@@ -1,8 +1,11 @@
-import NextAuth, { NextAuthOptions } from "next-auth";
+import {
+  NextAuthOptions,
+  getServerSession as nextAuthGetServerSession,
+} from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { Pool } from "pg";
-import { z } from "zod";
 import bcrypt from "bcryptjs";
+import { z } from "zod";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -16,6 +19,9 @@ const loginSchema = z.object({
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: "jwt",
+  },
+  pages: {
+    signIn: "/login",
   },
   providers: [
     CredentialsProvider({
@@ -35,15 +41,14 @@ export const authOptions: NextAuthOptions = {
         const client = await pool.connect();
         try {
           const result = await client.query(
-            "SELECT id, email, password_hash, role FROM users WHERE email = $1 LIMIT 1",
+            "SELECT id, email, name, password_hash FROM users WHERE email = $1 LIMIT 1",
             [email],
           );
 
-          if (result.rows.length === 0) {
+          const user = result.rows[0];
+          if (!user) {
             return null;
           }
-
-          const user = result.rows[0];
 
           const isValid = await bcrypt.compare(password, user.password_hash);
           if (!isValid) {
@@ -53,7 +58,7 @@ export const authOptions: NextAuthOptions = {
           return {
             id: String(user.id),
             email: user.email,
-            role: user.role,
+            name: user.name ?? null,
           };
         } finally {
           client.release();
@@ -65,24 +70,22 @@ export const authOptions: NextAuthOptions = {
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
-        token.role = (user as { id: string; email: string; role: string }).role;
+        token.email = user.email;
+        token.name = user.name;
       }
       return token;
     },
     async session({ session, token }) {
       if (token && session.user) {
-        (session.user as { id?: string; role?: string }).id =
-          token.id as string;
-        (session.user as { id?: string; role?: string }).role =
-          token.role as string;
+        session.user.id = token.id as string;
+        session.user.email = token.email as string;
+        session.user.name = token.name as string | null;
       }
       return session;
     },
   },
-  pages: {
-    signIn: "/login",
-  },
-  secret: process.env.NEXTAUTH_SECRET,
 };
 
-export default NextAuth(authOptions);
+export async function getServerSession() {
+  return nextAuthGetServerSession(authOptions);
+}

@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { z } from "zod";
 import { Pool } from "pg";
-import Anthropic from "@anthropic-ai/sdk";
 
 export const dynamic = "force-dynamic";
 
@@ -10,214 +9,257 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+const PostHearingSchema = z.object({
+  appeal_reason: z.string().min(1, "Appeal reason is required"),
+  requested_date: z.string().optional(),
+  owner_notes: z.string().optional(),
 });
 
-const hearingSchema = z.object({
-  scheduled_at: z.string().datetime(),
-  location: z.string().min(1, "Location is required"),
-  notes: z.string().optional().default(""),
+const PatchHearingSchema = z.object({
+  hearing_id: z.string().uuid("Invalid hearing ID"),
+  outcome: z.enum(["upheld", "dismissed", "reduced", "deferred"]),
+  board_notes: z.string().optional(),
+  fine_amount: z.number().nonnegative().optional(),
+  resolution_date: z.string().optional(),
 });
-
-async function generateHearingEmailContent(
-  violationDetails: Record<string, unknown>,
-  hearingDetails: { scheduled_at: string; location: string; notes: string },
-): Promise<string> {
-  const message = await anthropic.messages.create({
-    model: "claude-opus-4-5",
-    max_tokens: 1024,
-    messages: [
-      {
-        role: "user",
-        content: `Generate a professional hearing notification email for the following violation and hearing details:
-
-Violation Details:
-- Violation ID: ${violationDetails.id}
-- Type: ${violationDetails.type || "N/A"}
-- Description: ${violationDetails.description || "N/A"}
-- Status: ${violationDetails.status || "N/A"}
-- Reported Date: ${violationDetails.created_at || "N/A"}
-
-Hearing Details:
-- Scheduled At: ${hearingDetails.scheduled_at}
-- Location: ${hearingDetails.location}
-- Notes: ${hearingDetails.notes || "No additional notes"}
-
-Please write a formal, professional email notification that:
-1. Clearly states the hearing has been scheduled
-2. Includes all relevant details
-3. Explains what the recipient should bring or prepare
-4. Provides contact information placeholder [CONTACT_INFO]
-5. Has a professional closing
-
-Format the email with Subject line and Body.`,
-      },
-    ],
-  });
-
-  const textContent = message.content.find((block) => block.type === "text");
-  return textContent ? textContent.text : "Hearing notification email content";
-}
-
-async function sendHearingNotificationEmail(
-  recipientEmail: string,
-  emailContent: string,
-  violationId: string,
-): Promise<void> {
-  console.log(`Sending hearing notification email to: ${recipientEmail}`);
-  console.log(`Violation ID: ${violationId}`);
-  console.log(`Email Content:\n${emailContent}`);
-}
 
 export async function POST(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  const session = await getServerSession();
+
+  if (!session || !session.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const violationId = params.id;
+
+  if (!violationId) {
+    return NextResponse.json(
+      { error: "Violation ID is required" },
+      { status: 400 },
+    );
+  }
+
+  let body: unknown;
   try {
-    const session = await getServerSession();
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
-    if (!session || !session.user) {
-      return NextResponse.json(
-        { error: "Unauthorized. Please sign in to schedule a hearing." },
-        { status: 401 },
-      );
-    }
+  const parseResult = PostHearingSchema.safeParse(body);
+  if (!parseResult.success) {
+    return NextResponse.json(
+      { error: "Validation failed", details: parseResult.error.flatten() },
+      { status: 422 },
+    );
+  }
 
-    const violationId = params.id;
+  const { appeal_reason, requested_date, owner_notes } = parseResult.data;
 
-    if (!violationId || isNaN(parseInt(violationId))) {
-      return NextResponse.json(
-        { error: "Invalid violation ID" },
-        { status: 400 },
-      );
-    }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-    const body = await request.json();
-    const validationResult = hearingSchema.safeParse(body);
+    const violationResult = await client.query(
+      `SELECT id, status FROM violations WHERE id = $1`,
+      [violationId],
+    );
 
-    if (!validationResult.success) {
-      return NextResponse.json(
-        {
-          error: "Validation failed",
-          details: validationResult.error.flatten(),
-        },
-        { status: 400 },
-      );
-    }
-
-    const { scheduled_at, location, notes } = validationResult.data;
-
-    const client = await pool.connect();
-
-    try {
-      await client.query("BEGIN");
-
-      const violationResult = await client.query(
-        `SELECT v.*, u.email as reporter_email, u.name as reporter_name 
-         FROM violations v 
-         LEFT JOIN users u ON v.reporter_id = u.id 
-         WHERE v.id = $1`,
-        [violationId],
-      );
-
-      if (violationResult.rows.length === 0) {
-        await client.query("ROLLBACK");
-        return NextResponse.json(
-          { error: "Violation not found" },
-          { status: 404 },
-        );
-      }
-
-      const violation = violationResult.rows[0];
-
-      const existingHearingResult = await client.query(
-        `SELECT id FROM hearings WHERE violation_id = $1 AND status != 'cancelled'`,
-        [violationId],
-      );
-
-      if (existingHearingResult.rows.length > 0) {
-        await client.query("ROLLBACK");
-        return NextResponse.json(
-          {
-            error:
-              "An active hearing already exists for this violation. Please cancel it before scheduling a new one.",
-          },
-          { status: 409 },
-        );
-      }
-
-      const hearingResult = await client.query(
-        `INSERT INTO hearings (violation_id, scheduled_at, location, notes, status, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'scheduled', $5, NOW(), NOW())
-         RETURNING *`,
-        [violationId, scheduled_at, location, notes, session.user.email],
-      );
-
-      const hearing = hearingResult.rows[0];
-
-      await client.query(
-        `UPDATE violations SET status = 'hearing_scheduled', updated_at = NOW() WHERE id = $1`,
-        [violationId],
-      );
-
-      await client.query("COMMIT");
-
-      const emailContent = await generateHearingEmailContent(violation, {
-        scheduled_at,
-        location,
-        notes,
-      });
-
-      const recipientEmail = violation.reporter_email || session.user.email;
-      if (recipientEmail) {
-        await sendHearingNotificationEmail(
-          recipientEmail,
-          emailContent,
-          violationId,
-        );
-      }
-
-      return NextResponse.json(
-        {
-          success: true,
-          message: "Hearing scheduled successfully",
-          hearing: {
-            id: hearing.id,
-            violation_id: hearing.violation_id,
-            scheduled_at: hearing.scheduled_at,
-            location: hearing.location,
-            notes: hearing.notes,
-            status: hearing.status,
-            created_at: hearing.created_at,
-          },
-          notification: {
-            sent: !!recipientEmail,
-            recipient: recipientEmail,
-            email_preview: emailContent.substring(0, 200) + "...",
-          },
-        },
-        { status: 201 },
-      );
-    } catch (dbError) {
+    if (violationResult.rowCount === 0) {
       await client.query("ROLLBACK");
-      throw dbError;
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error("Error scheduling hearing:", error);
-
-    if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: "Validation error", details: error.flatten() },
-        { status: 400 },
+        { error: "Violation not found" },
+        { status: 404 },
       );
     }
+
+    const violation = violationResult.rows[0];
+
+    if (violation.status === "hearing_scheduled") {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "A hearing is already scheduled for this violation" },
+        { status: 409 },
+      );
+    }
+
+    const hearingResult = await client.query(
+      `INSERT INTO hearings (
+        violation_id,
+        appeal_reason,
+        requested_date,
+        owner_notes,
+        status,
+        created_by,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, 'pending', $5, NOW(), NOW())
+      RETURNING *`,
+      [
+        violationId,
+        appeal_reason,
+        requested_date || null,
+        owner_notes || null,
+        session.user.email || session.user.name,
+      ],
+    );
+
+    await client.query(
+      `UPDATE violations SET status = 'hearing_scheduled', updated_at = NOW() WHERE id = $1`,
+      [violationId],
+    );
+
+    await client.query("COMMIT");
 
     return NextResponse.json(
-      { error: "Internal server error. Failed to schedule hearing." },
+      {
+        message: "Hearing scheduled successfully",
+        hearing: hearingResult.rows[0],
+      },
+      { status: 201 },
+    );
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error creating hearing:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
       { status: 500 },
     );
+  } finally {
+    client.release();
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const session = await getServerSession();
+
+  if (!session || !session.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const violationId = params.id;
+
+  if (!violationId) {
+    return NextResponse.json(
+      { error: "Violation ID is required" },
+      { status: 400 },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const parseResult = PatchHearingSchema.safeParse(body);
+  if (!parseResult.success) {
+    return NextResponse.json(
+      { error: "Validation failed", details: parseResult.error.flatten() },
+      { status: 422 },
+    );
+  }
+
+  const { hearing_id, outcome, board_notes, fine_amount, resolution_date } =
+    parseResult.data;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const violationResult = await client.query(
+      `SELECT id, status FROM violations WHERE id = $1`,
+      [violationId],
+    );
+
+    if (violationResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Violation not found" },
+        { status: 404 },
+      );
+    }
+
+    const hearingResult = await client.query(
+      `SELECT id FROM hearings WHERE id = $1 AND violation_id = $2`,
+      [hearing_id, violationId],
+    );
+
+    if (hearingResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Hearing not found for this violation" },
+        { status: 404 },
+      );
+    }
+
+    const updatedHearingResult = await client.query(
+      `UPDATE hearings SET
+        outcome = $1,
+        board_notes = $2,
+        fine_amount = $3,
+        resolution_date = $4,
+        status = 'completed',
+        updated_at = NOW()
+      WHERE id = $5
+      RETURNING *`,
+      [
+        outcome,
+        board_notes || null,
+        fine_amount !== undefined ? fine_amount : null,
+        resolution_date || null,
+        hearing_id,
+      ],
+    );
+
+    let newViolationStatus: string;
+    switch (outcome) {
+      case "dismissed":
+        newViolationStatus = "closed";
+        break;
+      case "upheld":
+        newViolationStatus = "upheld";
+        break;
+      case "reduced":
+        newViolationStatus = "reduced";
+        break;
+      case "deferred":
+        newViolationStatus = "deferred";
+        break;
+      default:
+        newViolationStatus = "closed";
+    }
+
+    await client.query(
+      `UPDATE violations SET status = $1, updated_at = NOW() WHERE id = $2`,
+      [newViolationStatus, violationId],
+    );
+
+    await client.query("COMMIT");
+
+    return NextResponse.json(
+      {
+        message: "Hearing outcome recorded successfully",
+        hearing: updatedHearingResult.rows[0],
+        violation_status: newViolationStatus,
+      },
+      { status: 200 },
+    );
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error updating hearing outcome:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  } finally {
+    client.release();
   }
 }
