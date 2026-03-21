@@ -9,43 +9,20 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const StatusUpdateSchema = z.object({
-  status: z.enum([
-    "open",
-    "notified",
-    "fined",
-    "resolved",
-    "closed",
-    "appealed",
-  ]),
-  notes: z.string().optional(),
-});
-
-type ViolationStatus =
-  | "open"
-  | "notified"
-  | "fined"
-  | "resolved"
-  | "closed"
-  | "appealed";
+const VALID_STATUSES = ["open", "in_review", "resolved", "dismissed"] as const;
+type ViolationStatus = (typeof VALID_STATUSES)[number];
 
 const VALID_TRANSITIONS: Record<ViolationStatus, ViolationStatus[]> = {
-  open: ["notified", "closed", "appealed"],
-  notified: ["fined", "closed", "appealed"],
-  fined: ["resolved", "closed", "appealed"],
-  resolved: ["appealed"],
-  closed: ["appealed"],
-  appealed: ["open", "notified", "fined", "resolved", "closed"],
+  open: ["in_review", "dismissed"],
+  in_review: ["resolved", "dismissed", "open"],
+  resolved: ["open"],
+  dismissed: ["open"],
 };
 
-function isValidTransition(
-  from: ViolationStatus,
-  to: ViolationStatus,
-): boolean {
-  if (from === to) return false;
-  const allowed = VALID_TRANSITIONS[from] || [];
-  return allowed.includes(to);
-}
+const updateStatusSchema = z.object({
+  status: z.enum(VALID_STATUSES),
+  reason: z.string().optional(),
+});
 
 export async function PATCH(
   request: NextRequest,
@@ -57,9 +34,9 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { id } = params;
+  const violationId = params.id;
 
-  if (!id || isNaN(Number(id))) {
+  if (!violationId || isNaN(Number(violationId))) {
     return NextResponse.json(
       { error: "Invalid violation ID" },
       { status: 400 },
@@ -73,15 +50,15 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const parseResult = StatusUpdateSchema.safeParse(body);
+  const parseResult = updateStatusSchema.safeParse(body);
   if (!parseResult.success) {
     return NextResponse.json(
       { error: "Validation failed", details: parseResult.error.flatten() },
-      { status: 422 },
+      { status: 400 },
     );
   }
 
-  const { status: newStatus, notes } = parseResult.data;
+  const { status: newStatus, reason } = parseResult.data;
 
   const client = await pool.connect();
   try {
@@ -89,10 +66,10 @@ export async function PATCH(
 
     const violationResult = await client.query(
       "SELECT id, status FROM violations WHERE id = $1 FOR UPDATE",
-      [id],
+      [violationId],
     );
 
-    if (violationResult.rowCount === 0) {
+    if (violationResult.rows.length === 0) {
       await client.query("ROLLBACK");
       return NextResponse.json(
         { error: "Violation not found" },
@@ -101,54 +78,70 @@ export async function PATCH(
     }
 
     const violation = violationResult.rows[0];
-    const currentStatus = violation.status as ViolationStatus;
+    const oldStatus = violation.status as ViolationStatus;
 
-    if (!isValidTransition(currentStatus, newStatus)) {
+    if (oldStatus === newStatus) {
+      await client.query("ROLLBACK");
+      return NextResponse.json(
+        { error: "Status is already set to the requested value" },
+        { status: 400 },
+      );
+    }
+
+    const allowedTransitions = VALID_TRANSITIONS[oldStatus] || [];
+    if (!allowedTransitions.includes(newStatus)) {
       await client.query("ROLLBACK");
       return NextResponse.json(
         {
-          error: "Invalid status transition",
-          message: `Cannot transition from '${currentStatus}' to '${newStatus}'`,
-          allowedTransitions: VALID_TRANSITIONS[currentStatus],
+          error: `Invalid status transition from '${oldStatus}' to '${newStatus}'`,
+          allowedTransitions,
         },
-        { status: 409 },
+        { status: 422 },
       );
     }
 
     const updateResult = await client.query(
       `UPDATE violations
-       SET status = $1,
-           updated_at = NOW()
+       SET status = $1, updated_at = NOW()
        WHERE id = $2
        RETURNING id, status, updated_at`,
-      [newStatus, id],
+      [newStatus, violationId],
     );
 
+    const changedBy =
+      (session.user as { id?: string }).id || session.user.email || "unknown";
+
     await client.query(
-      `INSERT INTO violation_status_history (violation_id, from_status, to_status, notes, changed_by, changed_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT DO NOTHING`,
+      `INSERT INTO audit_log (
+        entity_type,
+        entity_id,
+        action,
+        old_value,
+        new_value,
+        changed_by,
+        reason,
+        created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
       [
-        id,
-        currentStatus,
+        "violation",
+        violationId,
+        "status_change",
+        oldStatus,
         newStatus,
-        notes || null,
-        session.user.email || session.user.name || "unknown",
+        changedBy,
+        reason || null,
       ],
     );
 
     await client.query("COMMIT");
 
-    const updatedViolation = updateResult.rows[0];
-
     return NextResponse.json(
       {
         success: true,
-        violation: {
-          id: updatedViolation.id,
-          status: updatedViolation.status,
-          updatedAt: updatedViolation.updated_at,
-          previousStatus: currentStatus,
+        violation: updateResult.rows[0],
+        transition: {
+          from: oldStatus,
+          to: newStatus,
         },
       },
       { status: 200 },

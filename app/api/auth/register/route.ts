@@ -10,9 +10,9 @@ const pool = new Pool({
 });
 
 const registerSchema = z.object({
+  name: z.string().min(1, "Name is required").max(100),
   email: z.string().email("Invalid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
-  name: z.string().min(1, "Name is required").optional(),
 });
 
 export async function POST(request: NextRequest) {
@@ -30,10 +30,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { email, password, name } = validationResult.data;
+    const { name, email, password } = validationResult.data;
 
     const client = await pool.connect();
-
     try {
       const existingUser = await client.query(
         "SELECT id FROM users WHERE email = $1",
@@ -42,19 +41,19 @@ export async function POST(request: NextRequest) {
 
       if (existingUser.rows.length > 0) {
         return NextResponse.json(
-          { error: "User with this email already exists" },
+          { error: "A user with this email already exists" },
           { status: 409 },
         );
       }
 
       const saltRounds = 12;
-      const passwordHash = await bcrypt.hash(password, saltRounds);
+      const password_hash = await bcrypt.hash(password, saltRounds);
 
       const result = await client.query(
-        `INSERT INTO users (email, password_hash, name, created_at, updated_at)
+        `INSERT INTO users (name, email, password_hash, created_at, updated_at)
          VALUES ($1, $2, $3, NOW(), NOW())
-         RETURNING id, email, name, created_at`,
-        [email, passwordHash, name || null],
+         RETURNING id, name, email, created_at`,
+        [name, email, password_hash],
       );
 
       const newUser = result.rows[0];
@@ -64,8 +63,8 @@ export async function POST(request: NextRequest) {
           message: "User registered successfully",
           user: {
             id: newUser.id,
-            email: newUser.email,
             name: newUser.name,
+            email: newUser.email,
             createdAt: newUser.created_at,
           },
         },

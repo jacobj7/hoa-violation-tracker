@@ -4,131 +4,84 @@ import { redirect } from "next/navigation";
 import { pool } from "@/lib/db";
 import PortalClient from "./PortalClient";
 
-interface Property {
-  id: number;
-  address: string;
-  unit_number: string | null;
-  property_type: string;
-  status: string;
-  created_at: string;
-}
-
 interface Violation {
   id: number;
-  property_id: number;
   property_address: string;
   violation_type: string;
   description: string;
   status: string;
-  fine_amount: number;
-  issued_at: string;
-  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+  notices: Notice[];
 }
 
-interface FineBalance {
-  property_id: number;
-  property_address: string;
-  total_fines: number;
-  paid_fines: number;
-  outstanding_balance: number;
+interface Notice {
+  id: number;
+  violation_id: number;
+  sent_at: string;
+  method: string;
+  content: string;
+  status: string;
 }
 
-interface PortalData {
-  properties: Property[];
-  violations: Violation[];
-  fineBalances: FineBalance[];
-  totalOutstanding: number;
-  ownerName: string;
-  ownerEmail: string;
-}
-
-async function getOwnerPortalData(userId: string): Promise<PortalData> {
+async function getOwnerViolations(ownerEmail: string): Promise<Violation[]> {
   const client = await pool.connect();
-
   try {
-    const userResult = await client.query(
-      `SELECT id, name, email FROM users WHERE id = $1`,
-      [userId],
-    );
-
-    if (userResult.rows.length === 0) {
-      throw new Error("User not found");
-    }
-
-    const user = userResult.rows[0];
-
-    const propertiesResult = await client.query(
-      `SELECT 
-        p.id,
-        p.address,
-        p.unit_number,
-        p.property_type,
-        p.status,
-        p.created_at::text as created_at
-      FROM properties p
-      WHERE p.owner_id = $1
-      ORDER BY p.address ASC`,
-      [userId],
-    );
-
-    const properties: Property[] = propertiesResult.rows;
-
     const violationsResult = await client.query(
-      `SELECT 
+      `
+      SELECT 
         v.id,
-        v.property_id,
-        p.address as property_address,
+        p.address AS property_address,
         v.violation_type,
         v.description,
         v.status,
-        v.fine_amount,
-        v.issued_at::text as issued_at,
-        v.resolved_at::text as resolved_at
+        v.created_at,
+        v.updated_at
       FROM violations v
       JOIN properties p ON v.property_id = p.id
-      WHERE p.owner_id = $1
-      ORDER BY v.issued_at DESC`,
-      [userId],
+      JOIN owners o ON p.owner_id = o.id
+      WHERE o.email = $1
+      ORDER BY v.created_at DESC
+      `,
+      [ownerEmail],
     );
 
-    const violations: Violation[] = violationsResult.rows;
+    const violations = violationsResult.rows;
 
-    const fineBalancesResult = await client.query(
-      `SELECT 
-        p.id as property_id,
-        p.address as property_address,
-        COALESCE(SUM(v.fine_amount), 0) as total_fines,
-        COALESCE(SUM(CASE WHEN v.status = 'paid' THEN v.fine_amount ELSE 0 END), 0) as paid_fines,
-        COALESCE(SUM(CASE WHEN v.status != 'paid' AND v.status != 'dismissed' THEN v.fine_amount ELSE 0 END), 0) as outstanding_balance
-      FROM properties p
-      LEFT JOIN violations v ON v.property_id = p.id
-      WHERE p.owner_id = $1
-      GROUP BY p.id, p.address
-      ORDER BY p.address ASC`,
-      [userId],
+    if (violations.length === 0) {
+      return [];
+    }
+
+    const violationIds = violations.map((v: { id: number }) => v.id);
+
+    const noticesResult = await client.query(
+      `
+      SELECT 
+        n.id,
+        n.violation_id,
+        n.sent_at,
+        n.method,
+        n.content,
+        n.status
+      FROM notices n
+      WHERE n.violation_id = ANY($1::int[])
+      ORDER BY n.sent_at DESC
+      `,
+      [violationIds],
     );
 
-    const fineBalances: FineBalance[] = fineBalancesResult.rows.map((row) => ({
-      property_id: row.property_id,
-      property_address: row.property_address,
-      total_fines: parseFloat(row.total_fines),
-      paid_fines: parseFloat(row.paid_fines),
-      outstanding_balance: parseFloat(row.outstanding_balance),
+    const noticesByViolationId: Record<number, Notice[]> = {};
+    for (const notice of noticesResult.rows) {
+      if (!noticesByViolationId[notice.violation_id]) {
+        noticesByViolationId[notice.violation_id] = [];
+      }
+      noticesByViolationId[notice.violation_id].push(notice);
+    }
+
+    return violations.map((v: Omit<Violation, "notices">) => ({
+      ...v,
+      notices: noticesByViolationId[v.id] || [],
     }));
-
-    const totalOutstanding = fineBalances.reduce(
-      (sum, fb) => sum + fb.outstanding_balance,
-      0,
-    );
-
-    return {
-      properties,
-      violations,
-      fineBalances,
-      totalOutstanding,
-      ownerName: user.name || "Property Owner",
-      ownerEmail: user.email,
-    };
   } finally {
     client.release();
   }
@@ -137,33 +90,24 @@ async function getOwnerPortalData(userId: string): Promise<PortalData> {
 export default async function PortalPage() {
   const session = await getServerSession(authOptions);
 
-  if (!session || !session.user) {
+  if (!session || !session.user?.email) {
     redirect("/login");
   }
 
-  const userId = (session.user as { id?: string }).id;
+  const violations = await getOwnerViolations(session.user.email);
 
-  if (!userId) {
-    redirect("/login");
-  }
-
-  let portalData: PortalData;
-
-  try {
-    portalData = await getOwnerPortalData(userId);
-  } catch (error) {
-    console.error("Failed to fetch portal data:", error);
-    portalData = {
-      properties: [],
-      violations: [],
-      fineBalances: [],
-      totalOutstanding: 0,
-      ownerName: session.user.name || "Property Owner",
-      ownerEmail: session.user.email || "",
-    };
-  }
-
-  const serializedData = JSON.parse(JSON.stringify(portalData));
-
-  return <PortalClient data={serializedData} />;
+  return (
+    <main className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900">Owner Portal</h1>
+          <p className="mt-2 text-sm text-gray-600">
+            Welcome back, {session.user.name || session.user.email}. View and
+            manage violations for your properties.
+          </p>
+        </div>
+        <PortalClient violations={violations} userEmail={session.user.email} />
+      </div>
+    </main>
+  );
 }

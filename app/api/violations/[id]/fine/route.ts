@@ -9,136 +9,96 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-const FineSchema = z.object({
-  amount: z.number().positive("Amount must be positive"),
-  currency: z.string().min(1).max(10).default("USD"),
-  due_date: z.string().datetime().optional(),
-  notes: z.string().max(1000).optional(),
+const createFineSchema = z.object({
+  amount: z.number().positive("Amount must be a positive number"),
+  due_date: z.string().refine((val) => !isNaN(Date.parse(val)), {
+    message: "due_date must be a valid date string",
+  }),
 });
 
 export async function POST(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
-  const session = await getServerSession();
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const violationId = params.id;
-
-  if (!violationId || isNaN(Number(violationId))) {
-    return NextResponse.json(
-      { error: "Invalid violation ID" },
-      { status: 400 },
-    );
-  }
-
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+    const session = await getServerSession();
 
-  const parseResult = FineSchema.safeParse(body);
-  if (!parseResult.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parseResult.error.flatten() },
-      { status: 422 },
-    );
-  }
+    if (!session || !session.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const { amount, currency, due_date, notes } = parseResult.data;
+    const violationId = params.id;
 
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const violationResult = await client.query(
-      `SELECT id, status FROM violations WHERE id = $1 FOR UPDATE`,
-      [violationId],
-    );
-
-    if (violationResult.rowCount === 0) {
-      await client.query("ROLLBACK");
+    if (!violationId) {
       return NextResponse.json(
-        { error: "Violation not found" },
-        { status: 404 },
+        { error: "Violation ID is required" },
+        { status: 400 },
       );
     }
 
-    const violation = violationResult.rows[0];
+    const body = await request.json();
 
-    if (violation.status === "fined") {
-      await client.query("ROLLBACK");
+    const parseResult = createFineSchema.safeParse(body);
+
+    if (!parseResult.success) {
       return NextResponse.json(
-        { error: "Violation has already been fined" },
-        { status: 409 },
+        {
+          error: "Validation failed",
+          details: parseResult.error.flatten().fieldErrors,
+        },
+        { status: 400 },
       );
     }
 
-    const fineResult = await client.query(
-      `INSERT INTO fines (violation_id, amount, currency, due_date, notes, issued_by, issued_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), NOW())
-       RETURNING *`,
-      [
-        violationId,
-        amount,
-        currency,
-        due_date ? new Date(due_date) : null,
-        notes || null,
-        session.user.email || session.user.name || "unknown",
-      ],
-    );
+    const { amount, due_date } = parseResult.data;
 
-    const fine = fineResult.rows[0];
+    const client = await pool.connect();
 
-    await client.query(
-      `UPDATE violations SET status = 'fined', updated_at = NOW() WHERE id = $1`,
-      [violationId],
-    );
+    try {
+      const violationCheck = await client.query(
+        "SELECT id FROM violations WHERE id = $1",
+        [violationId],
+      );
 
-    await client.query(
-      `INSERT INTO audit_log (entity_type, entity_id, action, actor, metadata, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [
-        "violation",
-        violationId,
-        "fine_issued",
-        session.user.email || session.user.name || "unknown",
-        JSON.stringify({
-          fine_id: fine.id,
-          amount,
-          currency,
-          due_date: due_date || null,
-          notes: notes || null,
-          previous_status: violation.status,
-        }),
-      ],
-    );
+      if (violationCheck.rows.length === 0) {
+        return NextResponse.json(
+          { error: "Violation not found" },
+          { status: 404 },
+        );
+      }
 
-    await client.query("COMMIT");
+      const result = await client.query(
+        `INSERT INTO fines (amount, due_date, violation_id, created_at, updated_at)
+         VALUES ($1, $2, $3, NOW(), NOW())
+         RETURNING *`,
+        [amount, due_date, violationId],
+      );
 
-    return NextResponse.json(
-      {
-        message: "Fine issued successfully",
-        fine,
-        violation_id: violationId,
-        violation_status: "fined",
-      },
-      { status: 201 },
-    );
+      const fine = result.rows[0];
+
+      return NextResponse.json(
+        {
+          message: "Fine created successfully",
+          fine,
+        },
+        { status: 201 },
+      );
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    await client.query("ROLLBACK");
-    console.error("Error issuing fine:", error);
+    console.error("Error creating fine:", error);
+
+    if (error instanceof SyntaxError) {
+      return NextResponse.json(
+        { error: "Invalid JSON in request body" },
+        { status: 400 },
+      );
+    }
+
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
     );
-  } finally {
-    client.release();
   }
 }
