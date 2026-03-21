@@ -1,57 +1,102 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-import { pool } from "@/lib/db";
 import { z } from "zod";
+import { Pool } from "pg";
 
 export const dynamic = "force-dynamic";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
 const createViolationTypeSchema = z.object({
   name: z.string().min(1).max(255),
   description: z.string().optional(),
-  base_fine: z.number().min(0),
-  community_id: z.number().int().positive(),
+  severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+  code: z.string().min(1).max(100).optional(),
+  is_active: z.boolean().optional().default(true),
 });
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession();
+
     if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
-    const communityId = searchParams.get("community_id");
-
-    if (!communityId) {
-      return NextResponse.json(
-        { error: "community_id query parameter is required" },
-        { status: 400 },
-      );
-    }
-
-    const parsedCommunityId = parseInt(communityId, 10);
-    if (isNaN(parsedCommunityId)) {
-      return NextResponse.json(
-        { error: "community_id must be a valid integer" },
-        { status: 400 },
-      );
-    }
+    const page = parseInt(searchParams.get("page") || "1", 10);
+    const limit = parseInt(searchParams.get("limit") || "50", 10);
+    const offset = (page - 1) * limit;
+    const search = searchParams.get("search") || "";
+    const severity = searchParams.get("severity") || "";
+    const isActive = searchParams.get("is_active");
 
     const client = await pool.connect();
-    try {
-      const result = await client.query(
-        `SELECT id, name, description, base_fine, community_id, created_at, updated_at
-         FROM violation_types
-         WHERE community_id = $1
-         ORDER BY name ASC`,
-        [parsedCommunityId],
-      );
 
-      return NextResponse.json(
-        { violation_types: result.rows },
-        { status: 200 },
-      );
+    try {
+      let whereConditions: string[] = [];
+      let queryParams: unknown[] = [];
+      let paramIndex = 1;
+
+      if (search) {
+        whereConditions.push(
+          `(name ILIKE $${paramIndex} OR description ILIKE $${paramIndex} OR code ILIKE $${paramIndex})`,
+        );
+        queryParams.push(`%${search}%`);
+        paramIndex++;
+      }
+
+      if (severity) {
+        whereConditions.push(`severity = $${paramIndex}`);
+        queryParams.push(severity);
+        paramIndex++;
+      }
+
+      if (isActive !== null && isActive !== undefined && isActive !== "") {
+        whereConditions.push(`is_active = $${paramIndex}`);
+        queryParams.push(isActive === "true");
+        paramIndex++;
+      }
+
+      const whereClause =
+        whereConditions.length > 0
+          ? `WHERE ${whereConditions.join(" AND ")}`
+          : "";
+
+      const countQuery = `SELECT COUNT(*) FROM violation_types ${whereClause}`;
+      const countResult = await client.query(countQuery, queryParams);
+      const total = parseInt(countResult.rows[0].count, 10);
+
+      const dataQuery = `
+        SELECT 
+          id,
+          name,
+          description,
+          severity,
+          code,
+          is_active,
+          created_at,
+          updated_at
+        FROM violation_types
+        ${whereClause}
+        ORDER BY name ASC
+        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+      `;
+
+      queryParams.push(limit, offset);
+      const result = await client.query(dataQuery, queryParams);
+
+      return NextResponse.json({
+        data: result.rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
     } finally {
       client.release();
     }
@@ -66,7 +111,8 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession();
+
     if (!session || !session.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -78,41 +124,65 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const parseResult = createViolationTypeSchema.safeParse(body);
-    if (!parseResult.success) {
+    const validationResult = createViolationTypeSchema.safeParse(body);
+
+    if (!validationResult.success) {
       return NextResponse.json(
-        { error: "Validation failed", details: parseResult.error.flatten() },
+        {
+          error: "Validation failed",
+          details: validationResult.error.flatten(),
+        },
         { status: 400 },
       );
     }
 
-    const { name, description, base_fine, community_id } = parseResult.data;
+    const { name, description, severity, code, is_active } =
+      validationResult.data;
 
     const client = await pool.connect();
+
     try {
-      const communityCheck = await client.query(
-        "SELECT id FROM communities WHERE id = $1",
-        [community_id],
+      if (code) {
+        const existingCode = await client.query(
+          "SELECT id FROM violation_types WHERE code = $1",
+          [code],
+        );
+
+        if (existingCode.rows.length > 0) {
+          return NextResponse.json(
+            { error: "A violation type with this code already exists" },
+            { status: 409 },
+          );
+        }
+      }
+
+      const existingName = await client.query(
+        "SELECT id FROM violation_types WHERE name = $1",
+        [name],
       );
 
-      if (communityCheck.rowCount === 0) {
+      if (existingName.rows.length > 0) {
         return NextResponse.json(
-          { error: "Community not found" },
-          { status: 404 },
+          { error: "A violation type with this name already exists" },
+          { status: 409 },
         );
       }
 
-      const result = await client.query(
-        `INSERT INTO violation_types (name, description, base_fine, community_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, NOW(), NOW())
-         RETURNING id, name, description, base_fine, community_id, created_at, updated_at`,
-        [name, description ?? null, base_fine, community_id],
-      );
+      const insertQuery = `
+        INSERT INTO violation_types (name, description, severity, code, is_active, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+        RETURNING id, name, description, severity, code, is_active, created_at, updated_at
+      `;
 
-      return NextResponse.json(
-        { violation_type: result.rows[0] },
-        { status: 201 },
-      );
+      const result = await client.query(insertQuery, [
+        name,
+        description || null,
+        severity || null,
+        code || null,
+        is_active,
+      ]);
+
+      return NextResponse.json({ data: result.rows[0] }, { status: 201 });
     } finally {
       client.release();
     }

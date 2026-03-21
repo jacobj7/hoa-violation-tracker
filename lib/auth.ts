@@ -1,13 +1,18 @@
-import NextAuth, { NextAuthOptions } from "next-auth";
+import { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
+import { query } from "@/lib/db";
 import bcrypt from "bcryptjs";
-import { Pool } from "pg";
+import { z } from "zod";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
 });
 
 export const authOptions: NextAuthOptions = {
+  session: {
+    strategy: "jwt",
+  },
   providers: [
     CredentialsProvider({
       name: "Credentials",
@@ -16,56 +21,52 @@ export const authOptions: NextAuthOptions = {
         password: { label: "Password", type: "password" },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) {
+        const parsed = loginSchema.safeParse(credentials);
+        if (!parsed.success) {
           return null;
         }
 
-        const client = await pool.connect();
-        try {
-          const result = await client.query(
-            "SELECT id, email, password_hash, role, name FROM users WHERE email = $1",
-            [credentials.email],
-          );
+        const { email, password } = parsed.data;
 
-          const user = result.rows[0];
+        const result = await query(
+          "SELECT id, email, password_hash, role FROM users WHERE email = $1 LIMIT 1",
+          [email],
+        );
 
-          if (!user) {
-            return null;
-          }
-
-          const isValid = await bcrypt.compare(
-            credentials.password,
-            user.password_hash,
-          );
-
-          if (!isValid) {
-            return null;
-          }
-
-          return {
-            id: String(user.id),
-            email: user.email,
-            name: user.name,
-            role: user.role,
-          };
-        } finally {
-          client.release();
+        if (result.rows.length === 0) {
+          return null;
         }
+
+        const user = result.rows[0];
+
+        const isValid = await bcrypt.compare(password, user.password_hash);
+        if (!isValid) {
+          return null;
+        }
+
+        return {
+          id: String(user.id),
+          email: user.email,
+          role: user.role,
+        };
       },
     }),
   ],
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.id = user.id;
+        token.userId = user.id;
         token.role = (user as any).role;
       }
       return token;
     },
     async session({ session, token }) {
-      if (token && session.user) {
-        (session.user as any).id = token.id as string;
-        (session.user as any).role = token.role as string;
+      if (token) {
+        session.user = session.user ?? {};
+        (session as any).userId = token.userId;
+        (session as any).role = token.role;
+        (session.user as any).id = token.userId;
+        (session.user as any).role = token.role;
       }
       return session;
     },
@@ -73,10 +74,5 @@ export const authOptions: NextAuthOptions = {
   pages: {
     signIn: "/login",
   },
-  session: {
-    strategy: "jwt",
-  },
   secret: process.env.NEXTAUTH_SECRET,
 };
-
-export default NextAuth(authOptions);

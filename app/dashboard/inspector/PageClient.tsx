@@ -15,8 +15,8 @@ interface Violation {
 }
 
 interface PageClientProps {
-  violations: Violation[];
-  inspectorName: string;
+  violations?: Violation[];
+  inspectorName?: string;
 }
 
 const severityColors: Record<string, string> = {

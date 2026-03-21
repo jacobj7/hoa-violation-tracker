@@ -1,55 +1,11 @@
-export type UserRole = "admin" | "inspector" | "resident" | "board_member";
-
-export type ViolationStatus =
-  | "open"
-  | "pending"
-  | "resolved"
-  | "closed"
-  | "appealed";
-
-export type ViolationSeverity = "low" | "medium" | "high" | "critical";
-
-export type InspectionStatus =
-  | "scheduled"
-  | "in_progress"
-  | "completed"
-  | "cancelled";
-
-export type FineStatus = "pending" | "paid" | "waived" | "overdue" | "disputed";
-
-export type HearingStatus =
-  | "scheduled"
-  | "completed"
-  | "cancelled"
-  | "postponed";
-
-export type HearingOutcome = "upheld" | "dismissed" | "reduced" | "pending";
-
-export type AuditAction =
-  | "created"
-  | "updated"
-  | "deleted"
-  | "status_changed"
-  | "assigned"
-  | "commented"
-  | "fine_issued"
-  | "fine_paid"
-  | "hearing_scheduled"
-  | "hearing_completed"
-  | "inspection_scheduled"
-  | "inspection_completed";
-
 export interface User {
   id: string;
   email: string;
   name: string;
-  role: UserRole;
-  phone?: string;
-  avatarUrl?: string;
-  communityId?: string;
-  propertyIds?: string[];
-  createdAt: Date;
-  updatedAt: Date;
+  role: "admin" | "board_member" | "resident" | "property_manager";
+  communityId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Community {
@@ -58,195 +14,229 @@ export interface Community {
   address: string;
   city: string;
   state: string;
-  zip: string;
-  phone?: string;
-  email?: string;
-  website?: string;
-  managementCompany?: string;
-  totalUnits: number;
-  createdAt: Date;
-  updatedAt: Date;
+  zipCode: string;
+  country: string;
+  description: string | null;
+  logoUrl: string | null;
+  settings: CommunitySettings;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CommunitySettings {
+  currency: string;
+  timezone: string;
+  violationGracePeriodDays: number;
+  fineEscalationEnabled: boolean;
+  autoNoticeEnabled: boolean;
+  maxDisputeDays: number;
 }
 
 export interface Property {
   id: string;
   communityId: string;
   address: string;
-  unit?: string;
-  city: string;
-  state: string;
-  zip: string;
-  ownerName: string;
-  ownerEmail?: string;
-  ownerPhone?: string;
-  tenantName?: string;
-  tenantEmail?: string;
-  tenantPhone?: string;
-  notes?: string;
-  createdAt: Date;
-  updatedAt: Date;
-  community?: Community;
-  violations?: Violation[];
+  unit: string | null;
+  lotNumber: string | null;
+  ownerId: string | null;
+  residentId: string | null;
+  propertyType: "single_family" | "condo" | "townhouse" | "commercial";
+  status: "active" | "inactive" | "foreclosure";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ViolationType {
+  id: string;
+  communityId: string;
+  name: string;
+  description: string;
+  category: string;
+  defaultFineAmount: number;
+  escalationFineAmount: number | null;
+  escalationAfterDays: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Violation {
   id: string;
   communityId: string;
   propertyId: string;
+  violationTypeId: string;
   reportedById: string;
-  assignedToId?: string;
-  title: string;
+  assignedToId: string | null;
+  status: "open" | "pending_review" | "resolved" | "escalated" | "dismissed";
+  severity: "low" | "medium" | "high" | "critical";
   description: string;
-  category: string;
-  severity: ViolationSeverity;
-  status: ViolationStatus;
-  dueDate?: Date;
-  resolvedAt?: Date;
-  closedAt?: Date;
-  imageUrls?: string[];
-  notes?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  notes: string | null;
+  incidentDate: string;
+  dueDate: string | null;
+  resolvedDate: string | null;
+  evidenceUrls: string[];
+  createdAt: string;
+  updatedAt: string;
   property?: Property;
-  community?: Community;
+  violationType?: ViolationType;
   reportedBy?: User;
-  assignedTo?: User;
-  inspections?: Inspection[];
   fines?: Fine[];
-  hearings?: Hearing[];
-  auditEntries?: AuditEntry[];
+  notices?: Notice[];
 }
 
-export interface Inspection {
+export interface Notice {
   id: string;
+  communityId: string;
   violationId: string;
-  inspectorId: string;
   propertyId: string;
-  scheduledAt: Date;
-  completedAt?: Date;
-  status: InspectionStatus;
-  findings?: string;
-  recommendations?: string;
-  imageUrls?: string[];
-  followUpRequired: boolean;
-  followUpDate?: Date;
-  createdAt: Date;
-  updatedAt: Date;
+  recipientId: string;
+  sentById: string;
+  type: "warning" | "formal_notice" | "final_notice" | "legal_notice";
+  status: "draft" | "sent" | "delivered" | "failed";
+  subject: string;
+  body: string;
+  sentAt: string | null;
+  deliveredAt: string | null;
+  aiGenerated: boolean;
+  createdAt: string;
+  updatedAt: string;
   violation?: Violation;
-  inspector?: User;
-  property?: Property;
+  recipient?: User;
+}
+
+export interface Dispute {
+  id: string;
+  communityId: string;
+  violationId: string;
+  filedById: string;
+  reviewedById: string | null;
+  status: "pending" | "under_review" | "approved" | "rejected" | "withdrawn";
+  reason: string;
+  evidence: string | null;
+  evidenceUrls: string[];
+  reviewNotes: string | null;
+  resolution: string | null;
+  filedAt: string;
+  reviewedAt: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  violation?: Violation;
+  filedBy?: User;
+  reviewedBy?: User | null;
 }
 
 export interface Fine {
   id: string;
+  communityId: string;
   violationId: string;
   propertyId: string;
+  issuedToId: string;
   issuedById: string;
   amount: number;
-  currency: string;
-  status: FineStatus;
-  dueDate: Date;
-  paidAt?: Date;
-  waivedAt?: Date;
-  waivedById?: string;
-  waivedReason?: string;
-  description?: string;
-  referenceNumber?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  status: "pending" | "paid" | "waived" | "disputed" | "overdue";
+  dueDate: string;
+  paidDate: string | null;
+  waivedDate: string | null;
+  waivedById: string | null;
+  waivedReason: string | null;
+  notes: string | null;
+  isEscalated: boolean;
+  createdAt: string;
+  updatedAt: string;
   violation?: Violation;
+  issuedTo?: User;
   property?: Property;
-  issuedBy?: User;
-  waivedBy?: User;
 }
 
-export interface Hearing {
+export interface AuditLog {
   id: string;
-  violationId: string;
-  propertyId: string;
-  scheduledById: string;
-  scheduledAt: Date;
-  location?: string;
-  virtualMeetingUrl?: string;
-  status: HearingStatus;
-  outcome?: HearingOutcome;
-  notes?: string;
-  attendees?: string[];
-  recordingUrl?: string;
-  createdAt: Date;
-  updatedAt: Date;
-  violation?: Violation;
-  property?: Property;
-  scheduledBy?: User;
-}
-
-export interface AuditEntry {
-  id: string;
+  communityId: string;
+  userId: string | null;
   entityType:
     | "violation"
-    | "inspection"
+    | "notice"
+    | "dispute"
     | "fine"
-    | "hearing"
     | "property"
-    | "user";
+    | "user"
+    | "community"
+    | "violation_type";
   entityId: string;
-  action: AuditAction;
-  performedById: string;
-  previousState?: Record<string, unknown>;
-  newState?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
-  ipAddress?: string;
-  userAgent?: string;
-  createdAt: Date;
-  performedBy?: User;
-}
-
-export interface PaginationParams {
-  page: number;
-  limit: number;
-  sortBy?: string;
-  sortOrder?: "asc" | "desc";
+  action: "create" | "update" | "delete" | "status_change" | "send" | "payment";
+  previousValues: Record<string, unknown> | null;
+  newValues: Record<string, unknown> | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  user?: User | null;
 }
 
 export interface PaginatedResponse<T> {
   data: T[];
   total: number;
   page: number;
-  limit: number;
+  pageSize: number;
   totalPages: number;
 }
 
-export interface ViolationFilters {
-  communityId?: string;
-  propertyId?: string;
-  status?: ViolationStatus | ViolationStatus[];
-  severity?: ViolationSeverity | ViolationSeverity[];
-  category?: string;
-  assignedToId?: string;
-  reportedById?: string;
-  dateFrom?: Date;
-  dateTo?: Date;
-  search?: string;
+export interface ApiError {
+  message: string;
+  code: string;
+  details?: Record<string, unknown>;
 }
 
 export interface DashboardStats {
   totalViolations: number;
   openViolations: number;
   resolvedViolations: number;
-  pendingInspections: number;
-  overdueViolations: number;
-  totalFinesIssued: number;
-  totalFinesCollected: number;
-  upcomingHearings: number;
-  violationsByCategory: Record<string, number>;
-  violationsBySeverity: Record<ViolationSeverity, number>;
-  violationsByStatus: Record<ViolationStatus, number>;
-  recentActivity: AuditEntry[];
+  escalatedViolations: number;
+  pendingDisputes: number;
+  totalFinesAmount: number;
+  collectedFinesAmount: number;
+  pendingFinesAmount: number;
+  recentViolations: Violation[];
+  violationsByType: ViolationTypeCount[];
+  violationsByStatus: ViolationStatusCount[];
+  finesByMonth: FinesByMonth[];
 }
 
-export interface ApiResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  message?: string;
+export interface ViolationTypeCount {
+  violationTypeName: string;
+  count: number;
 }
+
+export interface ViolationStatusCount {
+  status: string;
+  count: number;
+}
+
+export interface FinesByMonth {
+  month: string;
+  total: number;
+  collected: number;
+}
+
+export interface NoticeGenerationRequest {
+  violationId: string;
+  noticeType: Notice["type"];
+  recipientId: string;
+  additionalContext?: string;
+}
+
+export interface NoticeGenerationResponse {
+  subject: string;
+  body: string;
+}
+
+export type ViolationStatus = Violation["status"];
+export type ViolationSeverity = Violation["severity"];
+export type NoticeType = Notice["type"];
+export type NoticeStatus = Notice["status"];
+export type DisputeStatus = Dispute["status"];
+export type FineStatus = Fine["status"];
+export type UserRole = User["role"];
+export type PropertyType = Property["propertyType"];
+export type PropertyStatus = Property["status"];
+export type AuditEntityType = AuditLog["entityType"];
+export type AuditAction = AuditLog["action"];

@@ -1,276 +1,292 @@
 "use client";
 
-import { useState } from "react";
+import React from "react";
 
-interface StatusCounts {
-  all: number;
-  active: number;
-  completed: number;
-  pending: number;
-  failed: number;
-}
-
-interface SummaryCard {
+interface MetricCard {
   label: string;
   value: number | string;
-  description?: string;
-  color?: "blue" | "green" | "yellow" | "red" | "purple" | "gray";
+  color: string;
+}
+
+interface Violation {
+  id: string;
+  type: string;
+  description: string;
+  dueDate: string;
+  status: string;
+  severity: string;
+  location: string;
+}
+
+interface ViolationByType {
+  type: string;
+  count: number;
+  percentage: number;
+}
+
+interface DashboardData {
+  metrics: {
+    totalViolations: number;
+    overdueViolations: number;
+    resolvedThisMonth: number;
+    openViolations: number;
+  };
+  overdueViolations: Violation[];
+  violationsByType: ViolationByType[];
 }
 
 interface PageClientProps {
-  statusCounts?: StatusCounts;
-  summaryCards?: SummaryCard[];
+  data?: DashboardData;
 }
 
-const colorClasses = {
-  blue: {
-    bg: "bg-blue-50",
-    border: "border-blue-200",
-    text: "text-blue-700",
-    value: "text-blue-900",
-    badge: "bg-blue-100 text-blue-800",
-  },
-  green: {
-    bg: "bg-green-50",
-    border: "border-green-200",
-    text: "text-green-700",
-    value: "text-green-900",
-    badge: "bg-green-100 text-green-800",
-  },
-  yellow: {
-    bg: "bg-yellow-50",
-    border: "border-yellow-200",
-    text: "text-yellow-700",
-    value: "text-yellow-900",
-    badge: "bg-yellow-100 text-yellow-800",
-  },
-  red: {
-    bg: "bg-red-50",
-    border: "border-red-200",
-    text: "text-red-700",
-    value: "text-red-900",
-    badge: "bg-red-100 text-red-800",
-  },
-  purple: {
-    bg: "bg-purple-50",
-    border: "border-purple-200",
-    text: "text-purple-700",
-    value: "text-purple-900",
-    badge: "bg-purple-100 text-purple-800",
-  },
-  gray: {
-    bg: "bg-gray-50",
-    border: "border-gray-200",
-    text: "text-gray-700",
-    value: "text-gray-900",
-    badge: "bg-gray-100 text-gray-800",
-  },
+const severityColors: Record<string, string> = {
+  critical: "bg-red-100 text-red-800",
+  high: "bg-orange-100 text-orange-800",
+  medium: "bg-yellow-100 text-yellow-800",
+  low: "bg-green-100 text-green-800",
 };
 
-type TabKey = keyof StatusCounts;
+const statusColors: Record<string, string> = {
+  overdue: "bg-red-100 text-red-700",
+  open: "bg-blue-100 text-blue-700",
+  "in-progress": "bg-yellow-100 text-yellow-700",
+  resolved: "bg-green-100 text-green-700",
+};
 
-const tabs: { key: TabKey; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "active", label: "Active" },
-  { key: "completed", label: "Completed" },
-  { key: "pending", label: "Pending" },
-  { key: "failed", label: "Failed" },
+const typeBarColors = [
+  "bg-blue-500",
+  "bg-purple-500",
+  "bg-pink-500",
+  "bg-indigo-500",
+  "bg-teal-500",
+  "bg-orange-500",
 ];
 
-export default function PageClient({
-  statusCounts,
-  summaryCards,
-}: PageClientProps) {
-  const [activeTab, setActiveTab] = useState<TabKey>("all");
+export default function PageClient({ data }: PageClientProps) {
+  const { metrics, overdueViolations, violationsByType } = data;
 
-  const activeCount = statusCounts[activeTab];
+  const metricCards: MetricCard[] = [
+    {
+      label: "Total Violations",
+      value: metrics.totalViolations,
+      color: "border-l-blue-500",
+    },
+    {
+      label: "Open Violations",
+      value: metrics.openViolations,
+      color: "border-l-yellow-500",
+    },
+    {
+      label: "Overdue Violations",
+      value: metrics.overdueViolations,
+      color: "border-l-red-500",
+    },
+    {
+      label: "Resolved This Month",
+      value: metrics.resolvedThisMonth,
+      color: "border-l-green-500",
+    },
+  ];
 
   return (
-    <div className="space-y-8">
-      {/* Summary Cards */}
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Overview</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {summaryCards.map((card, index) => {
-            const color = card.color ?? "gray";
-            const classes = colorClasses[color];
-            return (
-              <div
-                key={index}
-                className={`rounded-xl border p-5 ${classes.bg} ${classes.border} transition-shadow hover:shadow-md`}
-              >
-                <p className={`text-sm font-medium ${classes.text}`}>
-                  {card.label}
-                </p>
-                <p className={`mt-2 text-3xl font-bold ${classes.value}`}>
-                  {card.value}
-                </p>
-                {card.description && (
-                  <p className={`mt-1 text-xs ${classes.text} opacity-80`}>
-                    {card.description}
-                  </p>
-                )}
-              </div>
-            );
-          })}
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-7xl mx-auto space-y-8">
+        {/* Header */}
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">
+            Violations Dashboard
+          </h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Overview of compliance violations and their current status
+          </p>
         </div>
-      </div>
 
-      {/* Status Tabs */}
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">
-          Status Breakdown
-        </h2>
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-          {/* Tab Bar */}
-          <div className="flex border-b border-gray-200 overflow-x-auto">
-            {tabs.map((tab) => {
-              const isActive = activeTab === tab.key;
-              const count = statusCounts[tab.key];
-              return (
-                <button
-                  key={tab.key}
-                  onClick={() => setActiveTab(tab.key)}
-                  className={`flex items-center gap-2 px-5 py-3 text-sm font-medium whitespace-nowrap transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
-                    isActive
-                      ? "border-b-2 border-blue-600 text-blue-600 bg-blue-50"
-                      : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-                  }`}
-                  aria-selected={isActive}
-                  role="tab"
+        {/* Summary Metric Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          {metricCards.map((card) => (
+            <div
+              key={card.label}
+              className={`bg-white rounded-xl shadow-sm border border-gray-200 border-l-4 ${card.color} p-6 flex flex-col gap-2`}
+            >
+              <span className="text-sm font-medium text-gray-500 uppercase tracking-wide">
+                {card.label}
+              </span>
+              <span className="text-4xl font-bold text-gray-900">
+                {card.value}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Main Content Grid */}
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+          {/* Overdue Violations Table */}
+          <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Overdue Violations
+              </h2>
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                {overdueViolations.length} overdue
+              </span>
+            </div>
+
+            {overdueViolations.length === 0 ? (
+              <div className="px-6 py-12 text-center">
+                <svg
+                  className="mx-auto h-12 w-12 text-gray-300"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
                 >
-                  {tab.label}
-                  <span
-                    className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-semibold ${
-                      isActive
-                        ? "bg-blue-100 text-blue-700"
-                        : "bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Tab Content */}
-          <div className="p-6" role="tabpanel">
-            {activeCount === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
-                  <svg
-                    className="w-8 h-8 text-gray-400"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                    aria-hidden="true"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.5}
-                      d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-                    />
-                  </svg>
-                </div>
-                <p className="text-gray-500 font-medium">
-                  No {activeTab === "all" ? "" : activeTab} items found
-                </p>
-                <p className="text-gray-400 text-sm mt-1">
-                  Items will appear here once they are created.
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <p className="mt-3 text-sm text-gray-500">
+                  No overdue violations. Great work!
                 </p>
               </div>
             ) : (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-gray-700 font-medium">
-                    Showing{" "}
-                    <span className="font-bold text-gray-900">
-                      {activeCount}
-                    </span>{" "}
-                    {activeTab === "all" ? "total" : activeTab}{" "}
-                    {activeCount === 1 ? "item" : "items"}
-                  </p>
-                  <span
-                    className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
-                      activeTab === "active"
-                        ? "bg-green-100 text-green-700"
-                        : activeTab === "completed"
-                          ? "bg-blue-100 text-blue-700"
-                          : activeTab === "pending"
-                            ? "bg-yellow-100 text-yellow-700"
-                            : activeTab === "failed"
-                              ? "bg-red-100 text-red-700"
-                              : "bg-gray-100 text-gray-700"
-                    }`}
-                  >
-                    {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
-                  </span>
-                </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Type
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Description
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Location
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Due Date
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Severity
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-100">
+                    {overdueViolations.map((violation) => (
+                      <tr
+                        key={violation.id}
+                        className="hover:bg-gray-50 transition-colors"
+                      >
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm font-medium text-gray-900">
+                            {violation.type}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="text-sm text-gray-600 line-clamp-2 max-w-xs">
+                            {violation.description}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm text-gray-600">
+                            {violation.location}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-sm font-medium text-red-600">
+                            {violation.dueDate}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${
+                              severityColors[
+                                violation.severity.toLowerCase()
+                              ] ?? "bg-gray-100 text-gray-700"
+                            }`}
+                          >
+                            {violation.severity}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium capitalize ${
+                              statusColors[violation.status.toLowerCase()] ??
+                              "bg-gray-100 text-gray-700"
+                            }`}
+                          >
+                            {violation.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
 
-                {/* Visual bar representing proportion */}
-                {statusCounts.all > 0 && (
-                  <div className="mt-4">
-                    <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                      <span>Proportion of total</span>
-                      <span>
-                        {Math.round((activeCount / statusCounts.all) * 100)}%
+          {/* Violations by Type Breakdown */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Violations by Type
+              </h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Distribution across categories
+              </p>
+            </div>
+
+            {violationsByType.length === 0 ? (
+              <div className="px-6 py-12 text-center">
+                <p className="text-sm text-gray-500">
+                  No violation data available.
+                </p>
+              </div>
+            ) : (
+              <div className="px-6 py-4 space-y-5">
+                {violationsByType.map((item, index) => (
+                  <div key={item.type} className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-gray-700 truncate max-w-[160px]">
+                        {item.type}
                       </span>
+                      <div className="flex items-center gap-2 ml-2 shrink-0">
+                        <span className="text-sm text-gray-500">
+                          {item.count}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          ({item.percentage.toFixed(1)}%)
+                        </span>
+                      </div>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
                       <div
                         className={`h-2.5 rounded-full transition-all duration-500 ${
-                          activeTab === "active"
-                            ? "bg-green-500"
-                            : activeTab === "completed"
-                              ? "bg-blue-500"
-                              : activeTab === "pending"
-                                ? "bg-yellow-500"
-                                : activeTab === "failed"
-                                  ? "bg-red-500"
-                                  : "bg-gray-500"
+                          typeBarColors[index % typeBarColors.length]
                         }`}
-                        style={{
-                          width:
-                            activeTab === "all"
-                              ? "100%"
-                              : `${Math.round((activeCount / statusCounts.all) * 100)}%`,
-                        }}
+                        style={{ width: `${Math.min(item.percentage, 100)}%` }}
                       />
                     </div>
                   </div>
-                )}
+                ))}
 
-                {/* Breakdown mini-grid when viewing all */}
-                {activeTab === "all" && (
-                  <div className="mt-6 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {tabs
-                      .filter((t) => t.key !== "all")
-                      .map((t) => {
-                        const count = statusCounts[t.key];
-                        const pct =
-                          statusCounts.all > 0
-                            ? Math.round((count / statusCounts.all) * 100)
-                            : 0;
-                        return (
-                          <button
-                            key={t.key}
-                            onClick={() => setActiveTab(t.key)}
-                            className="text-left rounded-lg border border-gray-200 p-3 hover:border-blue-300 hover:bg-blue-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                          >
-                            <p className="text-xs text-gray-500 font-medium capitalize">
-                              {t.label}
-                            </p>
-                            <p className="text-xl font-bold text-gray-900 mt-1">
-                              {count}
-                            </p>
-                            <p className="text-xs text-gray-400">{pct}%</p>
-                          </button>
-                        );
-                      })}
+                {/* Legend total */}
+                <div className="pt-4 border-t border-gray-100">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-gray-700">Total</span>
+                    <span className="font-bold text-gray-900">
+                      {violationsByType.reduce(
+                        (sum, item) => sum + item.count,
+                        0,
+                      )}
+                    </span>
                   </div>
-                )}
+                </div>
               </div>
             )}
           </div>
