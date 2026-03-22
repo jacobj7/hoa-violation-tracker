@@ -6,3 +6,7 @@ export default function Card() {
 }
 
 export { Card };
+
+export { default as CardContent };
+export { default as CardHeader };
+export { default as CardTitle };

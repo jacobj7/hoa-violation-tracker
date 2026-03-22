@@ -1,8 +1,15 @@
-import { NextAuthOptions } from "next-auth";
+import NextAuth, {
+  NextAuthOptions,
+  getServerSession as nextAuthGetServerSession,
+} from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
-import { query } from "@/lib/db";
 import bcrypt from "bcryptjs";
+import { Pool } from "pg";
 import { z } from "zod";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -10,9 +17,6 @@ const loginSchema = z.object({
 });
 
 export const authOptions: NextAuthOptions = {
-  session: {
-    strategy: "jwt",
-  },
   providers: [
     CredentialsProvider({
       name: "Credentials",
@@ -23,50 +27,60 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         const parsed = loginSchema.safeParse(credentials);
         if (!parsed.success) {
-          return null;
+          throw new Error("Invalid credentials format");
         }
 
         const { email, password } = parsed.data;
 
-        const result = await query(
-          "SELECT id, email, password_hash, role FROM users WHERE email = $1 LIMIT 1",
-          [email],
-        );
+        const client = await pool.connect();
+        try {
+          const result = await client.query(
+            "SELECT id, email, name, role, password_hash FROM users WHERE email = $1 LIMIT 1",
+            [email],
+          );
 
-        if (result.rows.length === 0) {
-          return null;
+          if (result.rows.length === 0) {
+            throw new Error("No user found with this email");
+          }
+
+          const user = result.rows[0];
+
+          const isValid = await bcrypt.compare(password, user.password_hash);
+          if (!isValid) {
+            throw new Error("Invalid password");
+          }
+
+          return {
+            id: String(user.id),
+            email: user.email,
+            name: user.name,
+            role: user.role,
+          };
+        } finally {
+          client.release();
         }
-
-        const user = result.rows[0];
-
-        const isValid = await bcrypt.compare(password, user.password_hash);
-        if (!isValid) {
-          return null;
-        }
-
-        return {
-          id: String(user.id),
-          email: user.email,
-          role: user.role,
-        };
       },
     }),
   ],
+  session: {
+    strategy: "jwt",
+  },
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.userId = user.id;
+        token.id = user.id;
         token.role = (user as any).role;
+        token.email = user.email;
+        token.name = user.name;
       }
       return token;
     },
     async session({ session, token }) {
-      if (token) {
-        session.user = session.user ?? {};
-        (session as any).userId = token.userId;
-        (session as any).role = token.role;
-        (session.user as any).id = token.userId;
-        (session.user as any).role = token.role;
+      if (token && session.user) {
+        (session.user as any).id = token.id as string;
+        (session.user as any).role = token.role as string;
+        session.user.email = token.email as string;
+        session.user.name = token.name as string;
       }
       return session;
     },
@@ -76,3 +90,7 @@ export const authOptions: NextAuthOptions = {
   },
   secret: process.env.NEXTAUTH_SECRET,
 };
+
+export async function getServerSession() {
+  return nextAuthGetServerSession(authOptions);
+}

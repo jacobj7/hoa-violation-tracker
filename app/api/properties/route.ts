@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { z } from "zod";
 import { Pool } from "pg";
 
@@ -11,189 +10,185 @@ const pool = new Pool({
 });
 
 const createPropertySchema = z.object({
-  title: z.string().min(1, "Title is required").max(255),
-  description: z.string().optional(),
   address: z.string().min(1, "Address is required"),
-  city: z.string().min(1, "City is required"),
-  state: z.string().min(1, "State is required"),
-  zip_code: z.string().min(1, "Zip code is required"),
-  country: z.string().default("US"),
-  price: z.number().positive("Price must be positive"),
-  bedrooms: z.number().int().min(0).optional(),
-  bathrooms: z.number().min(0).optional(),
-  square_feet: z.number().positive().optional(),
-  property_type: z
-    .enum([
-      "house",
-      "apartment",
-      "condo",
-      "townhouse",
-      "land",
-      "commercial",
-      "other",
-    ])
-    .default("house"),
-  status: z.enum(["active", "pending", "sold", "inactive"]).default("active"),
-  images: z.array(z.string().url()).optional(),
-  amenities: z.array(z.string()).optional(),
+  unit: z.string().optional().nullable(),
+  community_id: z.number().int().positive().optional().nullable(),
+  owner_id: z.number().int().positive().optional().nullable(),
 });
 
 export async function GET(request: NextRequest) {
-  const session = await getServerSession(authOptions);
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { searchParams } = new URL(request.url);
-  const page = parseInt(searchParams.get("page") || "1", 10);
-  const limit = parseInt(searchParams.get("limit") || "20", 10);
-  const status = searchParams.get("status");
-  const property_type = searchParams.get("property_type");
-  const city = searchParams.get("city");
-  const minPrice = searchParams.get("min_price");
-  const maxPrice = searchParams.get("max_price");
-
-  const offset = (page - 1) * limit;
-
-  const conditions: string[] = [];
-  const values: unknown[] = [];
-  let paramIndex = 1;
-
-  conditions.push(`p.user_id = $${paramIndex++}`);
-  values.push((session.user as { id: string }).id);
-
-  if (status) {
-    conditions.push(`p.status = $${paramIndex++}`);
-    values.push(status);
-  }
-
-  if (property_type) {
-    conditions.push(`p.property_type = $${paramIndex++}`);
-    values.push(property_type);
-  }
-
-  if (city) {
-    conditions.push(`p.city ILIKE $${paramIndex++}`);
-    values.push(`%${city}%`);
-  }
-
-  if (minPrice) {
-    conditions.push(`p.price >= $${paramIndex++}`);
-    values.push(parseFloat(minPrice));
-  }
-
-  if (maxPrice) {
-    conditions.push(`p.price <= $${paramIndex++}`);
-    values.push(parseFloat(maxPrice));
-  }
-
-  const whereClause =
-    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-  const client = await pool.connect();
-
   try {
-    const countResult = await client.query(
-      `SELECT COUNT(*) FROM properties p ${whereClause}`,
-      values,
-    );
+    const session = await getServerSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    const total = parseInt(countResult.rows[0].count, 10);
+    const { searchParams } = new URL(request.url);
+    const communityId = searchParams.get("community_id");
 
-    const dataValues = [...values, limit, offset];
-    const result = await client.query(
-      `SELECT p.* FROM properties p ${whereClause} ORDER BY p.created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
-      dataValues,
-    );
+    let query: string;
+    let params: (string | number)[];
 
-    return NextResponse.json({
-      data: result.rows,
-      pagination: {
-        page,
-        limit,
-        total,
-        total_pages: Math.ceil(total / limit),
-      },
-    });
+    if (communityId) {
+      const parsedCommunityId = parseInt(communityId, 10);
+      if (isNaN(parsedCommunityId)) {
+        return NextResponse.json(
+          { error: "Invalid community_id parameter" },
+          { status: 400 },
+        );
+      }
+
+      query = `
+        SELECT
+          p.id,
+          p.address,
+          p.unit,
+          p.community_id,
+          p.owner_id,
+          p.created_at,
+          p.updated_at,
+          u.id AS owner_user_id,
+          u.name AS owner_name,
+          u.email AS owner_email
+        FROM properties p
+        LEFT JOIN users u ON p.owner_id = u.id
+        WHERE p.community_id = $1
+        ORDER BY p.address ASC, p.unit ASC
+      `;
+      params = [parsedCommunityId];
+    } else {
+      query = `
+        SELECT
+          p.id,
+          p.address,
+          p.unit,
+          p.community_id,
+          p.owner_id,
+          p.created_at,
+          p.updated_at,
+          u.id AS owner_user_id,
+          u.name AS owner_name,
+          u.email AS owner_email
+        FROM properties p
+        LEFT JOIN users u ON p.owner_id = u.id
+        ORDER BY p.address ASC, p.unit ASC
+      `;
+      params = [];
+    }
+
+    const client = await pool.connect();
+    try {
+      const result = await client.query(query, params);
+      const properties = result.rows.map((row) => ({
+        id: row.id,
+        address: row.address,
+        unit: row.unit,
+        community_id: row.community_id,
+        owner_id: row.owner_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        owner: row.owner_user_id
+          ? {
+              id: row.owner_user_id,
+              name: row.owner_name,
+              email: row.owner_email,
+            }
+          : null,
+      }));
+
+      return NextResponse.json({ properties }, { status: 200 });
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    console.error("Error fetching properties:", error);
+    console.error("GET /api/properties error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
     );
-  } finally {
-    client.release();
   }
 }
 
 export async function POST(request: NextRequest) {
-  const session = await getServerSession(authOptions);
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+    const session = await getServerSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const parseResult = createPropertySchema.safeParse(body);
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
 
-  if (!parseResult.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parseResult.error.flatten() },
-      { status: 422 },
-    );
-  }
+    const parseResult = createPropertySchema.safeParse(body);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { error: "Validation failed", details: parseResult.error.flatten() },
+        { status: 400 },
+      );
+    }
 
-  const data = parseResult.data;
-  const userId = (session.user as { id: string }).id;
+    const { address, unit, community_id, owner_id } = parseResult.data;
 
-  const client = await pool.connect();
+    const client = await pool.connect();
+    try {
+      const insertQuery = `
+        INSERT INTO properties (address, unit, community_id, owner_id, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, NOW(), NOW())
+        RETURNING
+          id,
+          address,
+          unit,
+          community_id,
+          owner_id,
+          created_at,
+          updated_at
+      `;
+      const insertParams = [
+        address,
+        unit ?? null,
+        community_id ?? null,
+        owner_id ?? null,
+      ];
 
-  try {
-    const result = await client.query(
-      `INSERT INTO properties (
-        user_id, title, description, address, city, state, zip_code, country,
-        price, bedrooms, bathrooms, square_feet, property_type, status, images, amenities,
-        created_at, updated_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8,
-        $9, $10, $11, $12, $13, $14, $15, $16,
-        NOW(), NOW()
-      ) RETURNING *`,
-      [
-        userId,
-        data.title,
-        data.description ?? null,
-        data.address,
-        data.city,
-        data.state,
-        data.zip_code,
-        data.country,
-        data.price,
-        data.bedrooms ?? null,
-        data.bathrooms ?? null,
-        data.square_feet ?? null,
-        data.property_type,
-        data.status,
-        data.images ? JSON.stringify(data.images) : null,
-        data.amenities ? JSON.stringify(data.amenities) : null,
-      ],
-    );
+      const insertResult = await client.query(insertQuery, insertParams);
+      const newProperty = insertResult.rows[0];
 
-    return NextResponse.json({ data: result.rows[0] }, { status: 201 });
+      let owner = null;
+      if (newProperty.owner_id) {
+        const ownerResult = await client.query(
+          "SELECT id, name, email FROM users WHERE id = $1",
+          [newProperty.owner_id],
+        );
+        if (ownerResult.rows.length > 0) {
+          owner = {
+            id: ownerResult.rows[0].id,
+            name: ownerResult.rows[0].name,
+            email: ownerResult.rows[0].email,
+          };
+        }
+      }
+
+      return NextResponse.json(
+        {
+          property: {
+            ...newProperty,
+            owner,
+          },
+        },
+        { status: 201 },
+      );
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    console.error("Error creating property:", error);
+    console.error("POST /api/properties error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
     );
-  } finally {
-    client.release();
   }
 }
