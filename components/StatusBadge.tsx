@@ -1,56 +1,35 @@
-const STATUS_CONFIG = {
-  open: {
-    label: "Open",
-    className: "bg-red-100 text-red-800 border border-red-200",
-  },
-  notice_sent: {
-    label: "Notice Sent",
-    className: "bg-orange-100 text-orange-800 border border-orange-200",
-  },
-  appealed: {
-    label: "Appealed",
+const statusConfig: Record<string, { label: string; className: string }> = {
+  reported: {
+    label: "Reported",
     className: "bg-yellow-100 text-yellow-800 border border-yellow-200",
   },
-  hearing_scheduled: {
-    label: "Hearing Scheduled",
+  under_review: {
+    label: "Under Review",
     className: "bg-blue-100 text-blue-800 border border-blue-200",
   },
   resolved: {
     label: "Resolved",
     className: "bg-green-100 text-green-800 border border-green-200",
   },
-  closed: {
-    label: "Closed",
+  dismissed: {
+    label: "Dismissed",
     className: "bg-gray-100 text-gray-800 border border-gray-200",
   },
-} as const;
-
-export type ViolationStatus = keyof typeof STATUS_CONFIG;
+};
 
 interface StatusBadgeProps {
-  status: ViolationStatus | string;
-  className?: string;
+  status: string;
 }
 
-export default function StatusBadge({
-  status,
-  className = "",
-}: StatusBadgeProps) {
-  const config = STATUS_CONFIG[status as ViolationStatus];
-
-  if (!config) {
-    return (
-      <span
-        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 border border-gray-200 ${className}`}
-      >
-        {status}
-      </span>
-    );
-  }
+export default function StatusBadge({ status }: StatusBadgeProps) {
+  const config = statusConfig[status] ?? {
+    label: status,
+    className: "bg-gray-100 text-gray-800 border border-gray-200",
+  };
 
   return (
     <span
-      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${config.className} ${className}`}
+      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${config.className}`}
     >
       {config.label}
     </span>

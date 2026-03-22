@@ -1,215 +1,140 @@
 "use client";
 
-import { useState, useRef, ChangeEvent, FormEvent } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 interface Property {
-  id: string;
+  id: number;
   address: string;
+  unit_number?: string;
 }
 
-interface Category {
-  id: string;
-  name: string;
-}
-
-const VIOLATION_CATEGORIES: Category[] = [
-  { id: "noise", name: "Noise Complaint" },
-  { id: "parking", name: "Parking Violation" },
-  { id: "property_maintenance", name: "Property Maintenance" },
-  { id: "landscaping", name: "Landscaping" },
-  { id: "trash", name: "Trash / Debris" },
-  { id: "pets", name: "Pets / Animals" },
-  { id: "structural", name: "Structural Damage" },
-  { id: "signage", name: "Unauthorized Signage" },
-  { id: "other", name: "Other" },
+const VIOLATION_TYPES = [
+  "Noise Complaint",
+  "Parking Violation",
+  "Pet Policy Violation",
+  "Lease Violation",
+  "Property Damage",
+  "Unauthorized Occupant",
+  "Trash/Recycling Violation",
+  "Smoking Violation",
+  "HOA Rule Violation",
+  "Other",
 ];
 
-interface NewViolationClientProps {
-  properties: Property[];
-}
-
-export default function NewViolationClient({
-  properties,
-}: NewViolationClientProps) {
+export default function NewViolationClient() {
   const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [loadingProperties, setLoadingProperties] = useState(true);
+  const [propertiesError, setPropertiesError] = useState<string | null>(null);
 
   const [propertyId, setPropertyId] = useState("");
-  const [category, setCategory] = useState("");
+  const [violationType, setViolationType] = useState("");
   const [description, setDescription] = useState("");
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
-  const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState<string | null>(null);
 
-  const [isUploading, setIsUploading] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  function handlePhotoChange(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      setErrors((prev) => ({
-        ...prev,
-        photo: "Please select a valid image file.",
-      }));
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      setErrors((prev) => ({
-        ...prev,
-        photo: "Image must be less than 10MB.",
-      }));
-      return;
-    }
-
-    setErrors((prev) => {
-      const next = { ...prev };
-      delete next.photo;
-      return next;
-    });
-
-    setPhotoFile(file);
-    setUploadedPhotoUrl(null);
-
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setPhotoPreview(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-  }
-
-  function removePhoto() {
-    setPhotoFile(null);
-    setPhotoPreview(null);
-    setUploadedPhotoUrl(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  }
-
-  async function uploadPhoto(): Promise<string | null> {
-    if (!photoFile) return null;
-
-    setIsUploading(true);
-    try {
-      const formData = new FormData();
-      formData.append("file", photoFile);
-
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to upload photo.");
-      }
-
-      const data = await res.json();
-      return data.url as string;
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "Photo upload failed.";
-      setErrors((prev) => ({ ...prev, photo: message }));
-      return null;
-    } finally {
-      setIsUploading(false);
-    }
-  }
-
-  function validate(): boolean {
-    const newErrors: Record<string, string> = {};
-
-    if (!propertyId) newErrors.propertyId = "Please select a property.";
-    if (!category) newErrors.category = "Please select a category.";
-    if (!description.trim()) {
-      newErrors.description = "Please provide a description.";
-    } else if (description.trim().length < 10) {
-      newErrors.description = "Description must be at least 10 characters.";
-    } else if (description.trim().length > 2000) {
-      newErrors.description = "Description must be 2000 characters or fewer.";
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
-  }
-
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setSubmitError(null);
-
-    if (!validate()) return;
-
-    setIsSubmitting(true);
-
-    try {
-      let photoUrl = uploadedPhotoUrl;
-
-      if (photoFile && !uploadedPhotoUrl) {
-        photoUrl = await uploadPhoto();
-        if (photoFile && !photoUrl) {
-          setIsSubmitting(false);
-          return;
+  useEffect(() => {
+    async function fetchProperties() {
+      try {
+        const res = await fetch("/api/properties");
+        if (!res.ok) {
+          throw new Error("Failed to load properties");
         }
-        setUploadedPhotoUrl(photoUrl);
+        const data = await res.json();
+        setProperties(data.properties ?? data ?? []);
+      } catch (err: unknown) {
+        setPropertiesError(
+          err instanceof Error ? err.message : "Failed to load properties",
+        );
+      } finally {
+        setLoadingProperties(false);
       }
+    }
+    fetchProperties();
+  }, []);
 
-      const payload: Record<string, unknown> = {
-        propertyId,
-        category,
-        description: description.trim(),
-      };
+  function validate() {
+    const errors: Record<string, string> = {};
+    if (!propertyId) {
+      errors.propertyId = "Please select a property.";
+    }
+    if (!violationType) {
+      errors.violationType = "Please select a violation type.";
+    }
+    if (!description.trim()) {
+      errors.description = "Description is required.";
+    } else if (description.trim().length < 10) {
+      errors.description = "Description must be at least 10 characters.";
+    }
+    return errors;
+  }
 
-      if (photoUrl) {
-        payload.photoUrl = photoUrl;
-      }
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    setFieldErrors({});
 
+    const errors = validate();
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
       const res = await fetch("/api/violations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          property_id: Number(propertyId),
+          violation_type: violationType,
+          description: description.trim(),
+        }),
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || "Failed to submit violation.");
+        throw new Error(
+          data.error ?? data.message ?? "Failed to create violation",
+        );
       }
 
-      const data = await res.json();
-      const violationId = data.id || data.violation?.id;
-
-      if (violationId) {
-        router.push(`/violations/${violationId}`);
-      } else {
-        router.push("/violations");
-      }
+      router.push("/violations");
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "An unexpected error occurred.";
-      setSubmitError(message);
+      setError(
+        err instanceof Error ? err.message : "An unexpected error occurred",
+      );
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
   }
 
-  const isLoading = isUploading || isSubmitting;
-
   return (
-    <div className="max-w-2xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Report a Violation</h1>
+    <div className="max-w-2xl mx-auto py-8 px-4">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">
+          Report New Violation
+        </h1>
         <p className="mt-1 text-sm text-gray-500">
-          Fill out the form below to report a new HOA violation.
+          Fill out the form below to report a property violation.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} noValidate className="space-y-6">
-        {/* Property Selector */}
+      {error && (
+        <div className="mb-4 rounded-md bg-red-50 border border-red-200 p-4">
+          <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+
+      <form
+        onSubmit={handleSubmit}
+        noValidate
+        className="space-y-6 bg-white shadow rounded-lg p-6"
+      >
+        {/* Property Select */}
         <div>
           <label
             htmlFor="propertyId"
@@ -217,63 +142,78 @@ export default function NewViolationClient({
           >
             Property <span className="text-red-500">*</span>
           </label>
-          <select
-            id="propertyId"
-            name="propertyId"
-            value={propertyId}
-            onChange={(e) => setPropertyId(e.target.value)}
-            disabled={isLoading}
-            className={`mt-1 block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed ${
-              errors.propertyId
-                ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                : "border-gray-300 focus:border-blue-500"
-            }`}
-          >
-            <option value="">Select a property...</option>
-            {properties.map((property) => (
-              <option key={property.id} value={property.id}>
-                {property.address}
-              </option>
-            ))}
-          </select>
-          {errors.propertyId && (
-            <p className="mt-1 text-sm text-red-600">{errors.propertyId}</p>
+          <div className="mt-1">
+            {loadingProperties ? (
+              <div className="h-10 bg-gray-100 rounded animate-pulse" />
+            ) : propertiesError ? (
+              <p className="text-sm text-red-600">{propertiesError}</p>
+            ) : (
+              <select
+                id="propertyId"
+                name="propertyId"
+                value={propertyId}
+                onChange={(e) => setPropertyId(e.target.value)}
+                disabled={submitting}
+                className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  fieldErrors.propertyId
+                    ? "border-red-300 focus:ring-red-500"
+                    : "border-gray-300"
+                } disabled:bg-gray-50 disabled:text-gray-500`}
+              >
+                <option value="">Select a property…</option>
+                {properties.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.address}
+                    {p.unit_number ? ` — Unit ${p.unit_number}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          {fieldErrors.propertyId && (
+            <p className="mt-1 text-xs text-red-600">
+              {fieldErrors.propertyId}
+            </p>
           )}
         </div>
 
-        {/* Category Selector */}
+        {/* Violation Type Select */}
         <div>
           <label
-            htmlFor="category"
+            htmlFor="violationType"
             className="block text-sm font-medium text-gray-700"
           >
-            Category <span className="text-red-500">*</span>
+            Violation Type <span className="text-red-500">*</span>
           </label>
-          <select
-            id="category"
-            name="category"
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            disabled={isLoading}
-            className={`mt-1 block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed ${
-              errors.category
-                ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                : "border-gray-300 focus:border-blue-500"
-            }`}
-          >
-            <option value="">Select a category...</option>
-            {VIOLATION_CATEGORIES.map((cat) => (
-              <option key={cat.id} value={cat.id}>
-                {cat.name}
-              </option>
-            ))}
-          </select>
-          {errors.category && (
-            <p className="mt-1 text-sm text-red-600">{errors.category}</p>
+          <div className="mt-1">
+            <select
+              id="violationType"
+              name="violationType"
+              value={violationType}
+              onChange={(e) => setViolationType(e.target.value)}
+              disabled={submitting}
+              className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                fieldErrors.violationType
+                  ? "border-red-300 focus:ring-red-500"
+                  : "border-gray-300"
+              } disabled:bg-gray-50 disabled:text-gray-500`}
+            >
+              <option value="">Select a violation type…</option>
+              {VIOLATION_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </div>
+          {fieldErrors.violationType && (
+            <p className="mt-1 text-xs text-red-600">
+              {fieldErrors.violationType}
+            </p>
           )}
         </div>
 
-        {/* Description */}
+        {/* Description Textarea */}
         <div>
           <label
             htmlFor="description"
@@ -281,223 +221,48 @@ export default function NewViolationClient({
           >
             Description <span className="text-red-500">*</span>
           </label>
-          <textarea
-            id="description"
-            name="description"
-            rows={5}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            disabled={isLoading}
-            placeholder="Describe the violation in detail..."
-            className={`mt-1 block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed resize-y ${
-              errors.description
-                ? "border-red-300 focus:border-red-500 focus:ring-red-500"
-                : "border-gray-300 focus:border-blue-500"
-            }`}
-          />
-          <div className="mt-1 flex justify-between">
-            {errors.description ? (
-              <p className="text-sm text-red-600">{errors.description}</p>
-            ) : (
-              <span />
-            )}
-            <p className="text-xs text-gray-400">{description.length} / 2000</p>
+          <div className="mt-1">
+            <textarea
+              id="description"
+              name="description"
+              rows={5}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              disabled={submitting}
+              placeholder="Describe the violation in detail…"
+              className={`block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y ${
+                fieldErrors.description
+                  ? "border-red-300 focus:ring-red-500"
+                  : "border-gray-300"
+              } disabled:bg-gray-50 disabled:text-gray-500`}
+            />
           </div>
-        </div>
-
-        {/* Photo Upload */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Photo <span className="text-gray-400 font-normal">(optional)</span>
-          </label>
-
-          {!photoPreview ? (
-            <div
-              className={`mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-dashed rounded-md transition-colors ${
-                errors.photo
-                  ? "border-red-300"
-                  : "border-gray-300 hover:border-gray-400"
-              }`}
-            >
-              <div className="space-y-1 text-center">
-                <svg
-                  className="mx-auto h-12 w-12 text-gray-400"
-                  stroke="currentColor"
-                  fill="none"
-                  viewBox="0 0 48 48"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                <div className="flex text-sm text-gray-600 justify-center">
-                  <label
-                    htmlFor="photo"
-                    className={`relative cursor-pointer rounded-md font-medium text-blue-600 hover:text-blue-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500 ${
-                      isLoading ? "opacity-50 cursor-not-allowed" : ""
-                    }`}
-                  >
-                    <span>Upload a photo</span>
-                    <input
-                      id="photo"
-                      name="photo"
-                      type="file"
-                      accept="image/*"
-                      className="sr-only"
-                      ref={fileInputRef}
-                      onChange={handlePhotoChange}
-                      disabled={isLoading}
-                    />
-                  </label>
-                  <p className="pl-1">or drag and drop</p>
-                </div>
-                <p className="text-xs text-gray-500">
-                  PNG, JPG, GIF, WEBP up to 10MB
-                </p>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-1 relative">
-              <img
-                src={photoPreview}
-                alt="Violation photo preview"
-                className="w-full max-h-64 object-cover rounded-md border border-gray-300"
-              />
-              <button
-                type="button"
-                onClick={removePhoto}
-                disabled={isLoading}
-                className="absolute top-2 right-2 bg-white rounded-full p-1 shadow-md hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                aria-label="Remove photo"
-              >
-                <svg
-                  className="h-5 w-5 text-gray-600"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-              {uploadedPhotoUrl && (
-                <div className="absolute bottom-2 left-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
-                  <svg
-                    className="h-3 w-3"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M5 13l4 4L19 7"
-                    />
-                  </svg>
-                  Uploaded
-                </div>
-              )}
-            </div>
+          {fieldErrors.description && (
+            <p className="mt-1 text-xs text-red-600">
+              {fieldErrors.description}
+            </p>
           )}
-
-          {errors.photo && (
-            <p className="mt-1 text-sm text-red-600">{errors.photo}</p>
-          )}
+          <p className="mt-1 text-xs text-gray-400">
+            {description.trim().length} characters
+          </p>
         </div>
-
-        {/* Submit Error */}
-        {submitError && (
-          <div className="rounded-md bg-red-50 border border-red-200 p-4">
-            <div className="flex">
-              <svg
-                className="h-5 w-5 text-red-400 flex-shrink-0"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-                  clipRule="evenodd"
-                />
-              </svg>
-              <p className="ml-3 text-sm text-red-700">{submitError}</p>
-            </div>
-          </div>
-        )}
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-3 pt-2">
           <button
             type="button"
-            onClick={() => router.back()}
-            disabled={isLoading}
-            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            onClick={() => router.push("/violations")}
+            disabled={submitting}
+            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
           >
             Cancel
           </button>
           <button
             type="submit"
-            disabled={isLoading}
-            className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            disabled={submitting || loadingProperties}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isUploading ? (
-              <>
-                <svg
-                  className="animate-spin -ml-1 mr-2 h-4 w-4 text-white"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  />
-                </svg>
-                Uploading photo...
-              </>
-            ) : isSubmitting ? (
-              <>
-                <svg
-                  className="animate-spin -ml-1 mr-2 h-4 w-4 text-white"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  />
-                </svg>
-                Submitting...
-              </>
-            ) : (
-              "Submit Violation"
-            )}
+            {submitting ? "Submitting…" : "Submit Violation"}
           </button>
         </div>
       </form>
