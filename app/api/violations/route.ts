@@ -1,126 +1,103 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { z } from "zod";
-import { Pool } from "pg";
-
-export const dynamic = "force-dynamic";
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+import { query } from "@/lib/db";
 
 const createViolationSchema = z.object({
   property_id: z.number().int().positive(),
   category_id: z.number().int().positive(),
-  inspector_id: z.number().int().positive(),
-  description: z.string().min(1).max(5000),
-  cure_deadline: z.string().refine((val) => !isNaN(Date.parse(val)), {
-    message: "cure_deadline must be a valid date string",
-  }),
-  status: z
-    .enum(["open", "closed", "pending", "resolved"])
-    .optional()
-    .default("open"),
+  description: z.string().min(1).max(2000),
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  location_details: z.string().max(500).optional(),
+  due_date: z.string().optional(),
 });
 
 export async function GET(request: NextRequest) {
+  const session = await getServerSession(authOptions);
+
+  if (!session || !session.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
-
-    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
-    const limit = Math.min(
-      100,
-      Math.max(1, parseInt(searchParams.get("limit") || "20", 10)),
-    );
+    const property_id = searchParams.get("property_id");
+    const status = searchParams.get("status");
+    const severity = searchParams.get("severity");
+    const page = parseInt(searchParams.get("page") || "1", 10);
+    const limit = parseInt(searchParams.get("limit") || "20", 10);
     const offset = (page - 1) * limit;
 
-    const status = searchParams.get("status");
-    const property_id = searchParams.get("property_id");
-    const category_id = searchParams.get("category_id");
-    const inspector_id = searchParams.get("inspector_id");
-
-    const conditions: string[] = [];
-    const params: (string | number)[] = [];
-    let paramIndex = 1;
-
-    if (status) {
-      conditions.push(`v.status = $${paramIndex++}`);
-      params.push(status);
-    }
-
-    if (property_id) {
-      const pid = parseInt(property_id, 10);
-      if (!isNaN(pid)) {
-        conditions.push(`v.property_id = $${paramIndex++}`);
-        params.push(pid);
-      }
-    }
-
-    if (category_id) {
-      const cid = parseInt(category_id, 10);
-      if (!isNaN(cid)) {
-        conditions.push(`v.category_id = $${paramIndex++}`);
-        params.push(cid);
-      }
-    }
-
-    if (inspector_id) {
-      const iid = parseInt(inspector_id, 10);
-      if (!isNaN(iid)) {
-        conditions.push(`v.inspector_id = $${paramIndex++}`);
-        params.push(iid);
-      }
-    }
-
-    const whereClause =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM violations v
-      ${whereClause}
-    `;
-
-    const dataQuery = `
+    let queryText = `
       SELECT
         v.id,
         v.property_id,
+        p.address AS property_address,
         v.category_id,
-        v.inspector_id,
+        vc.name AS category_name,
         v.description,
+        v.severity,
         v.status,
-        v.cure_deadline,
+        v.location_details,
+        v.due_date,
         v.created_at,
-        v.updated_at
+        v.updated_at,
+        v.created_by,
+        u.name AS created_by_name
       FROM violations v
-      ${whereClause}
-      ORDER BY v.created_at DESC
-      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      LEFT JOIN properties p ON v.property_id = p.id
+      LEFT JOIN violation_categories vc ON v.category_id = vc.id
+      LEFT JOIN users u ON v.created_by = u.id
+      WHERE 1=1
     `;
+    const params: (string | number)[] = [];
+    let paramIndex = 1;
 
-    const client = await pool.connect();
-    try {
-      const [countResult, dataResult] = await Promise.all([
-        client.query(countQuery, params),
-        client.query(dataQuery, [...params, limit, offset]),
-      ]);
-
-      const total = parseInt(countResult.rows[0].total, 10);
-      const rows = dataResult.rows;
-
-      return NextResponse.json({
-        data: rows,
-        pagination: {
-          total,
-          page,
-          limit,
-          total_pages: Math.ceil(total / limit),
-        },
-      });
-    } finally {
-      client.release();
+    if (property_id) {
+      queryText += ` AND v.property_id = $${paramIndex++}`;
+      params.push(parseInt(property_id, 10));
     }
+
+    if (status) {
+      queryText += ` AND v.status = $${paramIndex++}`;
+      params.push(status);
+    }
+
+    if (severity) {
+      queryText += ` AND v.severity = $${paramIndex++}`;
+      params.push(severity);
+    }
+
+    // Non-admin users only see violations for their assigned properties
+    const userRole = (session.user as { role?: string }).role;
+    if (userRole !== "admin" && userRole !== "manager") {
+      queryText += ` AND v.created_by = $${paramIndex++}`;
+      params.push(
+        (session.user as { id?: string | number }).id as string | number,
+      );
+    }
+
+    const countQuery = `SELECT COUNT(*) FROM (${queryText}) AS subquery`;
+    const countResult = await query(countQuery, params);
+    const total = parseInt(countResult.rows[0].count, 10);
+
+    queryText += ` ORDER BY v.created_at DESC LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
+    params.push(limit, offset);
+
+    const result = await query(queryText, params);
+
+    return NextResponse.json({
+      violations: result.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
   } catch (error) {
-    console.error("GET /api/violations error:", error);
+    console.error("Error fetching violations:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
@@ -129,57 +106,66 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-    }
+  const session = await getServerSession(authOptions);
 
-    const parseResult = createViolationSchema.safeParse(body);
-    if (!parseResult.success) {
+  if (!session || !session.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const userRole = (session.user as { role?: string }).role;
+  if (
+    userRole !== "manager" &&
+    userRole !== "inspector" &&
+    userRole !== "admin"
+  ) {
+    return NextResponse.json(
+      { error: "Forbidden: insufficient permissions" },
+      { status: 403 },
+    );
+  }
+
+  try {
+    const body = await request.json();
+    const parsed = createViolationSchema.safeParse(body);
+
+    if (!parsed.success) {
       return NextResponse.json(
-        {
-          error: "Validation failed",
-          details: parseResult.error.flatten(),
-        },
-        { status: 422 },
+        { error: "Validation failed", details: parsed.error.flatten() },
+        { status: 400 },
       );
     }
 
     const {
       property_id,
       category_id,
-      inspector_id,
       description,
-      cure_deadline,
-      status,
-    } = parseResult.data;
+      severity,
+      location_details,
+      due_date,
+    } = parsed.data;
 
-    const client = await pool.connect();
-    try {
-      const insertQuery = `
-        INSERT INTO violations (property_id, category_id, inspector_id, description, cure_deadline, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-        RETURNING id, property_id, category_id, inspector_id, description, status, cure_deadline, created_at, updated_at
-      `;
+    const userId = (session.user as { id?: string | number }).id;
 
-      const result = await client.query(insertQuery, [
+    const result = await query(
+      `INSERT INTO violations
+        (property_id, category_id, description, severity, status, location_details, due_date, created_by, created_at, updated_at)
+       VALUES
+        ($1, $2, $3, $4, 'open', $5, $6, $7, NOW(), NOW())
+       RETURNING *`,
+      [
         property_id,
         category_id,
-        inspector_id,
         description,
-        new Date(cure_deadline).toISOString(),
-        status,
-      ]);
+        severity,
+        location_details || null,
+        due_date || null,
+        userId,
+      ],
+    );
 
-      return NextResponse.json({ data: result.rows[0] }, { status: 201 });
-    } finally {
-      client.release();
-    }
+    return NextResponse.json({ violation: result.rows[0] }, { status: 201 });
   } catch (error) {
-    console.error("POST /api/violations error:", error);
+    console.error("Error creating violation:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
