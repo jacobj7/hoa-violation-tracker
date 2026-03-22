@@ -1,142 +1,100 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { pool } from "@/lib/db";
-import { z } from "zod";
+import { query } from "@/lib/db";
 
-export const dynamic = "force-dynamic";
+export async function GET(request: NextRequest) {
+  const session = await getServerSession(authOptions);
 
-const allowedRoles = ["manager", "admin"];
+  if (!session || !session.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
-export async function GET(req: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const userId = (session.user as { id?: string }).id;
 
-    if (!session || !session.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const propertiesResult = await query(
+      `SELECT COUNT(*) as count FROM properties WHERE user_id = $1`,
+      [userId],
+    );
 
-    const userRole = (session.user as { role?: string }).role;
+    const violationsResult = await query(
+      `SELECT 
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'open' THEN 1 END) as open_count,
+        COUNT(CASE WHEN status = 'resolved' THEN 1 END) as resolved_count,
+        COUNT(CASE WHEN status = 'appealed' THEN 1 END) as appealed_count,
+        COUNT(CASE WHEN status = 'closed' THEN 1 END) as closed_count
+      FROM violations v
+      JOIN properties p ON v.property_id = p.id
+      WHERE p.user_id = $1`,
+      [userId],
+    );
 
-    if (!userRole || !allowedRoles.includes(userRole)) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+    const recentViolationsResult = await query(
+      `SELECT 
+        v.id,
+        v.title,
+        v.status,
+        v.severity,
+        v.created_at,
+        p.address as property_address
+      FROM violations v
+      JOIN properties p ON v.property_id = p.id
+      WHERE p.user_id = $1
+      ORDER BY v.created_at DESC
+      LIMIT 5`,
+      [userId],
+    );
 
-    const client = await pool.connect();
+    const finesSummaryResult = await query(
+      `SELECT 
+        COALESCE(SUM(fine_amount), 0) as total_fines,
+        COALESCE(SUM(CASE WHEN fine_paid = false AND fine_amount IS NOT NULL THEN fine_amount ELSE 0 END), 0) as unpaid_fines,
+        COALESCE(SUM(CASE WHEN fine_paid = true THEN fine_amount ELSE 0 END), 0) as paid_fines
+      FROM violations v
+      JOIN properties p ON v.property_id = p.id
+      WHERE p.user_id = $1`,
+      [userId],
+    );
 
-    try {
-      const [
-        violationsByStatusResult,
-        totalFinesResult,
-        overdueViolationsResult,
-        violationsByTypeResult,
-      ] = await Promise.all([
-        client.query(`
-          SELECT 
-            status,
-            COUNT(*) as count
-          FROM violations
-          GROUP BY status
-          ORDER BY status
-        `),
+    const violationsByCategoryResult = await query(
+      `SELECT 
+        vc.name as category,
+        COUNT(v.id) as count
+      FROM violations v
+      JOIN properties p ON v.property_id = p.id
+      JOIN violation_categories vc ON v.category_id = vc.id
+      WHERE p.user_id = $1
+      GROUP BY vc.name
+      ORDER BY count DESC
+      LIMIT 5`,
+      [userId],
+    );
 
-        client.query(`
-          SELECT 
-            COALESCE(SUM(fine_amount), 0) as total_fines,
-            COALESCE(SUM(CASE WHEN status = 'paid' THEN fine_amount ELSE 0 END), 0) as paid_fines,
-            COALESCE(SUM(CASE WHEN status != 'paid' THEN fine_amount ELSE 0 END), 0) as unpaid_fines
-          FROM violations
-        `),
+    const summary = {
+      properties: {
+        total: parseInt(propertiesResult.rows[0]?.count || "0"),
+      },
+      violations: {
+        total: parseInt(violationsResult.rows[0]?.total || "0"),
+        open: parseInt(violationsResult.rows[0]?.open_count || "0"),
+        resolved: parseInt(violationsResult.rows[0]?.resolved_count || "0"),
+        appealed: parseInt(violationsResult.rows[0]?.appealed_count || "0"),
+        closed: parseInt(violationsResult.rows[0]?.closed_count || "0"),
+      },
+      fines: {
+        total: parseFloat(finesSummaryResult.rows[0]?.total_fines || "0"),
+        unpaid: parseFloat(finesSummaryResult.rows[0]?.unpaid_fines || "0"),
+        paid: parseFloat(finesSummaryResult.rows[0]?.paid_fines || "0"),
+      },
+      recentViolations: recentViolationsResult.rows,
+      violationsByCategory: violationsByCategoryResult.rows,
+    };
 
-        client.query(`
-          SELECT 
-            v.id,
-            v.violation_type,
-            v.status,
-            v.fine_amount,
-            v.due_date,
-            v.created_at,
-            v.description,
-            u.name as user_name,
-            u.email as user_email
-          FROM violations v
-          LEFT JOIN users u ON v.user_id = u.id
-          WHERE v.status NOT IN ('paid', 'dismissed')
-            AND v.due_date < NOW()
-          ORDER BY v.due_date ASC
-          LIMIT 50
-        `),
-
-        client.query(`
-          SELECT 
-            violation_type,
-            COUNT(*) as count,
-            COALESCE(SUM(fine_amount), 0) as total_fines
-          FROM violations
-          GROUP BY violation_type
-          ORDER BY count DESC
-        `),
-      ]);
-
-      const violationsByStatus = violationsByStatusResult.rows.reduce(
-        (
-          acc: Record<string, number>,
-          row: { status: string; count: string },
-        ) => {
-          acc[row.status] = parseInt(row.count, 10);
-          return acc;
-        },
-        {},
-      );
-
-      const finesData = totalFinesResult.rows[0];
-      const totalFines = {
-        total: parseFloat(finesData.total_fines),
-        paid: parseFloat(finesData.paid_fines),
-        unpaid: parseFloat(finesData.unpaid_fines),
-      };
-
-      const overdueViolations = overdueViolationsResult.rows.map((row) => ({
-        id: row.id,
-        violationType: row.violation_type,
-        status: row.status,
-        fineAmount: parseFloat(row.fine_amount || 0),
-        dueDate: row.due_date,
-        createdAt: row.created_at,
-        description: row.description,
-        user: {
-          name: row.user_name,
-          email: row.user_email,
-        },
-      }));
-
-      const violationsByType = violationsByTypeResult.rows.map((row) => ({
-        type: row.violation_type,
-        count: parseInt(row.count, 10),
-        totalFines: parseFloat(row.total_fines),
-      }));
-
-      const totalViolations = Object.values(violationsByStatus).reduce(
-        (sum, count) => sum + count,
-        0,
-      );
-
-      return NextResponse.json({
-        summary: {
-          totalViolations,
-          violationsByStatus,
-          totalFines,
-          overdueViolations,
-          violationsByType,
-          overdueCount: overdueViolations.length,
-          generatedAt: new Date().toISOString(),
-        },
-      });
-    } finally {
-      client.release();
-    }
+    return NextResponse.json(summary);
   } catch (error) {
-    console.error("Dashboard summary error:", error);
+    console.error("Error fetching dashboard summary:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },

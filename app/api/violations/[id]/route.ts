@@ -1,268 +1,230 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { pool } from "@/lib/db";
+import { z } from "zod";
+import { query } from "@/lib/db";
 
-export const dynamic = "force-dynamic";
+const updateViolationSchema = z.object({
+  status: z.enum(["open", "pending", "resolved", "appealed"]).optional(),
+  description: z.string().min(1).optional(),
+  fine_amount: z.number().nonnegative().optional(),
+  due_date: z.string().optional(),
+  notes: z.string().optional(),
+});
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = params;
+
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const result = await query(
+      `SELECT v.*, 
+              vc.name as category_name, 
+              vc.description as category_description,
+              p.address as property_address,
+              p.unit_number,
+              u.name as owner_name,
+              u.email as owner_email
+       FROM violations v
+       LEFT JOIN violation_categories vc ON v.category_id = vc.id
+       LEFT JOIN properties p ON v.property_id = p.id
+       LEFT JOIN users u ON p.owner_id = u.id
+       WHERE v.id = $1`,
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        { error: "Violation not found" },
+        { status: 404 },
+      );
     }
 
-    const { id } = params;
+    const violation = result.rows[0];
 
-    if (!id || isNaN(Number(id))) {
+    // Non-admin users can only view violations for their own properties
+    if (session.user.role !== "admin") {
+      const propertyCheck = await query(
+        `SELECT p.owner_id FROM properties p
+         JOIN violations v ON v.property_id = p.id
+         WHERE v.id = $1`,
+        [id],
+      );
+
+      if (
+        propertyCheck.rows.length === 0 ||
+        propertyCheck.rows[0].owner_id !== session.user.id
+      ) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
+
+    return NextResponse.json({ violation });
+  } catch (error) {
+    console.error("Error fetching violation:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { id } = params;
+
+  try {
+    const body = await request.json();
+    const validatedData = updateViolationSchema.parse(body);
+
+    // Check violation exists
+    const existingViolation = await query(
+      `SELECT v.*, p.owner_id FROM violations v
+       JOIN properties p ON v.property_id = p.id
+       WHERE v.id = $1`,
+      [id],
+    );
+
+    if (existingViolation.rows.length === 0) {
       return NextResponse.json(
-        { error: "Invalid violation ID" },
+        { error: "Violation not found" },
+        { status: 404 },
+      );
+    }
+
+    const violation = existingViolation.rows[0];
+
+    // Non-admin users can only update status to "appealed" on their own violations
+    if (session.user.role !== "admin") {
+      if (violation.owner_id !== session.user.id) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+
+      const allowedFields = Object.keys(validatedData);
+      const nonAdminAllowedFields = ["status"];
+      const hasDisallowedFields = allowedFields.some(
+        (field) => !nonAdminAllowedFields.includes(field),
+      );
+
+      if (hasDisallowedFields) {
+        return NextResponse.json(
+          {
+            error: "Forbidden: insufficient permissions to update these fields",
+          },
+          { status: 403 },
+        );
+      }
+
+      if (validatedData.status && validatedData.status !== "appealed") {
+        return NextResponse.json(
+          { error: "Forbidden: you can only set status to appealed" },
+          { status: 403 },
+        );
+      }
+    }
+
+    // Build dynamic update query
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
+
+    if (validatedData.status !== undefined) {
+      updates.push(`status = $${paramIndex++}`);
+      values.push(validatedData.status);
+    }
+    if (validatedData.description !== undefined) {
+      updates.push(`description = $${paramIndex++}`);
+      values.push(validatedData.description);
+    }
+    if (validatedData.fine_amount !== undefined) {
+      updates.push(`fine_amount = $${paramIndex++}`);
+      values.push(validatedData.fine_amount);
+    }
+    if (validatedData.due_date !== undefined) {
+      updates.push(`due_date = $${paramIndex++}`);
+      values.push(validatedData.due_date);
+    }
+    if (validatedData.notes !== undefined) {
+      updates.push(`notes = $${paramIndex++}`);
+      values.push(validatedData.notes);
+    }
+
+    if (updates.length === 0) {
+      return NextResponse.json(
+        { error: "No fields to update" },
         { status: 400 },
       );
     }
 
-    const client = await pool.connect();
+    updates.push(`updated_at = NOW()`);
+    values.push(id);
 
-    try {
-      // Fetch the main violation with property, owner, and violation type
-      const violationResult = await client.query(
-        `
-        SELECT
-          v.id,
-          v.status,
-          v.description,
-          v.occurred_at,
-          v.resolved_at,
-          v.created_at,
-          v.updated_at,
-          v.notes,
-          v.severity,
-          v.inspector_id,
+    const result = await query(
+      `UPDATE violations SET ${updates.join(", ")} WHERE id = $${paramIndex} RETURNING *`,
+      values,
+    );
 
-          -- Property details
-          p.id AS property_id,
-          p.address AS property_address,
-          p.city AS property_city,
-          p.state AS property_state,
-          p.zip AS property_zip,
-          p.parcel_number,
-          p.property_type,
-
-          -- Owner details
-          o.id AS owner_id,
-          o.first_name AS owner_first_name,
-          o.last_name AS owner_last_name,
-          o.email AS owner_email,
-          o.phone AS owner_phone,
-          o.mailing_address AS owner_mailing_address,
-
-          -- Violation type details
-          vt.id AS violation_type_id,
-          vt.name AS violation_type_name,
-          vt.code AS violation_type_code,
-          vt.description AS violation_type_description,
-          vt.category AS violation_type_category,
-          vt.base_fine_amount,
-
-          -- Inspector details
-          u.id AS inspector_user_id,
-          u.name AS inspector_name,
-          u.email AS inspector_email
-
-        FROM violations v
-        LEFT JOIN properties p ON v.property_id = p.id
-        LEFT JOIN owners o ON p.owner_id = o.id
-        LEFT JOIN violation_types vt ON v.violation_type_id = vt.id
-        LEFT JOIN users u ON v.inspector_id = u.id
-        WHERE v.id = $1
-        `,
-        [id],
-      );
-
-      if (violationResult.rows.length === 0) {
-        return NextResponse.json(
-          { error: "Violation not found" },
-          { status: 404 },
-        );
-      }
-
-      const row = violationResult.rows[0];
-
-      // Fetch notices for this violation
-      const noticesResult = await client.query(
-        `
-        SELECT
-          n.id,
-          n.notice_type,
-          n.sent_at,
-          n.delivered_at,
-          n.method,
-          n.content,
-          n.status,
-          n.created_at,
-          u.name AS sent_by_name,
-          u.email AS sent_by_email
-        FROM notices n
-        LEFT JOIN users u ON n.sent_by = u.id
-        WHERE n.violation_id = $1
-        ORDER BY n.sent_at DESC
-        `,
-        [id],
-      );
-
-      // Fetch fines for this violation
-      const finesResult = await client.query(
-        `
-        SELECT
-          f.id,
-          f.amount,
-          f.issued_at,
-          f.due_date,
-          f.paid_at,
-          f.status,
-          f.waived,
-          f.waived_reason,
-          f.created_at,
-          f.updated_at
-        FROM fines f
-        WHERE f.violation_id = $1
-        ORDER BY f.issued_at DESC
-        `,
-        [id],
-      );
-
-      // Fetch disputes for this violation
-      const disputesResult = await client.query(
-        `
-        SELECT
-          d.id,
-          d.reason,
-          d.status,
-          d.submitted_at,
-          d.resolved_at,
-          d.resolution_notes,
-          d.created_at,
-          d.updated_at,
-          u.name AS resolved_by_name,
-          u.email AS resolved_by_email
-        FROM disputes d
-        LEFT JOIN users u ON d.resolved_by = u.id
-        WHERE d.violation_id = $1
-        ORDER BY d.submitted_at DESC
-        `,
-        [id],
-      );
-
-      const violation = {
-        id: row.id,
-        status: row.status,
-        description: row.description,
-        occurredAt: row.occurred_at,
-        resolvedAt: row.resolved_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        notes: row.notes,
-        severity: row.severity,
-
-        property: row.property_id
-          ? {
-              id: row.property_id,
-              address: row.property_address,
-              city: row.property_city,
-              state: row.property_state,
-              zip: row.property_zip,
-              parcelNumber: row.parcel_number,
-              propertyType: row.property_type,
-            }
-          : null,
-
-        owner: row.owner_id
-          ? {
-              id: row.owner_id,
-              firstName: row.owner_first_name,
-              lastName: row.owner_last_name,
-              email: row.owner_email,
-              phone: row.owner_phone,
-              mailingAddress: row.owner_mailing_address,
-            }
-          : null,
-
-        violationType: row.violation_type_id
-          ? {
-              id: row.violation_type_id,
-              name: row.violation_type_name,
-              code: row.violation_type_code,
-              description: row.violation_type_description,
-              category: row.violation_type_category,
-              baseFineAmount: row.base_fine_amount,
-            }
-          : null,
-
-        inspector: row.inspector_user_id
-          ? {
-              id: row.inspector_user_id,
-              name: row.inspector_name,
-              email: row.inspector_email,
-            }
-          : null,
-
-        notices: noticesResult.rows.map((n) => ({
-          id: n.id,
-          noticeType: n.notice_type,
-          sentAt: n.sent_at,
-          deliveredAt: n.delivered_at,
-          method: n.method,
-          content: n.content,
-          status: n.status,
-          createdAt: n.created_at,
-          sentBy: n.sent_by_name
-            ? {
-                name: n.sent_by_name,
-                email: n.sent_by_email,
-              }
-            : null,
-        })),
-
-        fines: finesResult.rows.map((f) => ({
-          id: f.id,
-          amount: f.amount,
-          issuedAt: f.issued_at,
-          dueDate: f.due_date,
-          paidAt: f.paid_at,
-          status: f.status,
-          waived: f.waived,
-          waivedReason: f.waived_reason,
-          createdAt: f.created_at,
-          updatedAt: f.updated_at,
-        })),
-
-        disputes: disputesResult.rows.map((d) => ({
-          id: d.id,
-          reason: d.reason,
-          status: d.status,
-          submittedAt: d.submitted_at,
-          resolvedAt: d.resolved_at,
-          resolutionNotes: d.resolution_notes,
-          createdAt: d.created_at,
-          updatedAt: d.updated_at,
-          resolvedBy: d.resolved_by_name
-            ? {
-                name: d.resolved_by_name,
-                email: d.resolved_by_email,
-              }
-            : null,
-        })),
-      };
-
-      return NextResponse.json({ violation });
-    } finally {
-      client.release();
-    }
+    return NextResponse.json({ violation: result.rows[0] });
   } catch (error) {
-    console.error("Error fetching violation detail:", error);
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: "Validation error", details: error.errors },
+        { status: 400 },
+      );
+    }
+    console.error("Error updating violation:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const session = await getServerSession(authOptions);
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (session.user.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const { id } = params;
+
+  try {
+    const result = await query(
+      `DELETE FROM violations WHERE id = $1 RETURNING id`,
+      [id],
+    );
+
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        { error: "Violation not found" },
+        { status: 404 },
+      );
+    }
+
+    return NextResponse.json({ message: "Violation deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting violation:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 },
