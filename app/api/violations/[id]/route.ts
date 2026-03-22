@@ -27,58 +27,34 @@ export async function GET(
     const client = await pool.connect();
 
     try {
-      // Fetch the main violation with property, owner, and violation type
       const violationResult = await client.query(
-        `
-        SELECT
+        `SELECT
           v.id,
+          v.case_number,
           v.status,
           v.description,
-          v.occurred_at,
-          v.resolved_at,
+          v.location,
+          v.violation_date,
           v.created_at,
           v.updated_at,
+          v.reported_by,
+          v.assigned_to,
           v.notes,
-          v.severity,
-          v.inspector_id,
-
-          -- Property details
-          p.id AS property_id,
-          p.address AS property_address,
-          p.city AS property_city,
-          p.state AS property_state,
-          p.zip AS property_zip,
-          p.parcel_number,
-          p.property_type,
-
-          -- Owner details
-          o.id AS owner_id,
-          o.first_name AS owner_first_name,
-          o.last_name AS owner_last_name,
-          o.email AS owner_email,
-          o.phone AS owner_phone,
-          o.mailing_address AS owner_mailing_address,
-
-          -- Violation type details
           vt.id AS violation_type_id,
           vt.name AS violation_type_name,
           vt.code AS violation_type_code,
           vt.description AS violation_type_description,
-          vt.category AS violation_type_category,
-          vt.base_fine_amount,
-
-          -- Inspector details
-          u.id AS inspector_user_id,
-          u.name AS inspector_name,
-          u.email AS inspector_email
-
+          reporter.id AS reporter_id,
+          reporter.name AS reporter_name,
+          reporter.email AS reporter_email,
+          assignee.id AS assignee_id,
+          assignee.name AS assignee_name,
+          assignee.email AS assignee_email
         FROM violations v
-        LEFT JOIN properties p ON v.property_id = p.id
-        LEFT JOIN owners o ON p.owner_id = o.id
         LEFT JOIN violation_types vt ON v.violation_type_id = vt.id
-        LEFT JOIN users u ON v.inspector_id = u.id
-        WHERE v.id = $1
-        `,
+        LEFT JOIN users reporter ON v.reported_by = reporter.id
+        LEFT JOIN users assignee ON v.assigned_to = assignee.id
+        WHERE v.id = $1`,
         [id],
       );
 
@@ -89,175 +65,138 @@ export async function GET(
         );
       }
 
-      const row = violationResult.rows[0];
+      const violation = violationResult.rows[0];
 
-      // Fetch notices for this violation
+      const evidencePhotosResult = await client.query(
+        `SELECT
+          ep.id,
+          ep.file_url,
+          ep.file_name,
+          ep.file_size,
+          ep.mime_type,
+          ep.caption,
+          ep.uploaded_by,
+          ep.created_at,
+          u.name AS uploaded_by_name
+        FROM evidence_photos ep
+        LEFT JOIN users u ON ep.uploaded_by = u.id
+        WHERE ep.violation_id = $1
+        ORDER BY ep.created_at ASC`,
+        [id],
+      );
+
       const noticesResult = await client.query(
-        `
-        SELECT
+        `SELECT
           n.id,
-          n.notice_type,
-          n.sent_at,
-          n.delivered_at,
-          n.method,
-          n.content,
+          n.notice_number,
+          n.type,
           n.status,
+          n.issued_date,
+          n.due_date,
+          n.content,
+          n.sent_via,
+          n.sent_at,
           n.created_at,
-          u.name AS sent_by_name,
-          u.email AS sent_by_email
+          n.updated_at,
+          issuer.id AS issued_by_id,
+          issuer.name AS issued_by_name,
+          issuer.email AS issued_by_email
         FROM notices n
-        LEFT JOIN users u ON n.sent_by = u.id
+        LEFT JOIN users issuer ON n.issued_by = issuer.id
         WHERE n.violation_id = $1
-        ORDER BY n.sent_at DESC
-        `,
+        ORDER BY n.issued_date DESC`,
         [id],
       );
 
-      // Fetch fines for this violation
       const finesResult = await client.query(
-        `
-        SELECT
+        `SELECT
           f.id,
+          f.fine_number,
           f.amount,
-          f.issued_at,
-          f.due_date,
-          f.paid_at,
           f.status,
-          f.waived,
-          f.waived_reason,
+          f.issued_date,
+          f.due_date,
+          f.paid_date,
+          f.payment_method,
+          f.payment_reference,
+          f.notes,
           f.created_at,
-          f.updated_at
+          f.updated_at,
+          issuer.id AS issued_by_id,
+          issuer.name AS issued_by_name,
+          issuer.email AS issued_by_email
         FROM fines f
+        LEFT JOIN users issuer ON f.issued_by = issuer.id
         WHERE f.violation_id = $1
-        ORDER BY f.issued_at DESC
-        `,
+        ORDER BY f.issued_date DESC`,
         [id],
       );
 
-      // Fetch disputes for this violation
-      const disputesResult = await client.query(
-        `
-        SELECT
-          d.id,
-          d.reason,
-          d.status,
-          d.submitted_at,
-          d.resolved_at,
-          d.resolution_notes,
-          d.created_at,
-          d.updated_at,
-          u.name AS resolved_by_name,
-          u.email AS resolved_by_email
-        FROM disputes d
-        LEFT JOIN users u ON d.resolved_by = u.id
-        WHERE d.violation_id = $1
-        ORDER BY d.submitted_at DESC
-        `,
+      const appealsResult = await client.query(
+        `SELECT
+          a.id,
+          a.appeal_number,
+          a.status,
+          a.reason,
+          a.submitted_date,
+          a.reviewed_date,
+          a.decision,
+          a.decision_notes,
+          a.created_at,
+          a.updated_at,
+          submitter.id AS submitted_by_id,
+          submitter.name AS submitted_by_name,
+          submitter.email AS submitted_by_email,
+          reviewer.id AS reviewed_by_id,
+          reviewer.name AS reviewed_by_name,
+          reviewer.email AS reviewed_by_email
+        FROM appeals a
+        LEFT JOIN users submitter ON a.submitted_by = submitter.id
+        LEFT JOIN users reviewer ON a.reviewed_by = reviewer.id
+        WHERE a.violation_id = $1
+        ORDER BY a.submitted_date DESC`,
         [id],
       );
 
-      const violation = {
-        id: row.id,
-        status: row.status,
-        description: row.description,
-        occurredAt: row.occurred_at,
-        resolvedAt: row.resolved_at,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        notes: row.notes,
-        severity: row.severity,
-
-        property: row.property_id
+      const fullViolation = {
+        id: violation.id,
+        case_number: violation.case_number,
+        status: violation.status,
+        description: violation.description,
+        location: violation.location,
+        violation_date: violation.violation_date,
+        created_at: violation.created_at,
+        updated_at: violation.updated_at,
+        notes: violation.notes,
+        violation_type: violation.violation_type_id
           ? {
-              id: row.property_id,
-              address: row.property_address,
-              city: row.property_city,
-              state: row.property_state,
-              zip: row.property_zip,
-              parcelNumber: row.parcel_number,
-              propertyType: row.property_type,
+              id: violation.violation_type_id,
+              name: violation.violation_type_name,
+              code: violation.violation_type_code,
+              description: violation.violation_type_description,
             }
           : null,
-
-        owner: row.owner_id
+        reporter: violation.reporter_id
           ? {
-              id: row.owner_id,
-              firstName: row.owner_first_name,
-              lastName: row.owner_last_name,
-              email: row.owner_email,
-              phone: row.owner_phone,
-              mailingAddress: row.owner_mailing_address,
+              id: violation.reporter_id,
+              name: violation.reporter_name,
+              email: violation.reporter_email,
             }
           : null,
-
-        violationType: row.violation_type_id
+        assignee: violation.assignee_id
           ? {
-              id: row.violation_type_id,
-              name: row.violation_type_name,
-              code: row.violation_type_code,
-              description: row.violation_type_description,
-              category: row.violation_type_category,
-              baseFineAmount: row.base_fine_amount,
+              id: violation.assignee_id,
+              name: violation.assignee_name,
+              email: violation.assignee_email,
             }
           : null,
-
-        inspector: row.inspector_user_id
-          ? {
-              id: row.inspector_user_id,
-              name: row.inspector_name,
-              email: row.inspector_email,
-            }
-          : null,
-
-        notices: noticesResult.rows.map((n) => ({
-          id: n.id,
-          noticeType: n.notice_type,
-          sentAt: n.sent_at,
-          deliveredAt: n.delivered_at,
-          method: n.method,
-          content: n.content,
-          status: n.status,
-          createdAt: n.created_at,
-          sentBy: n.sent_by_name
-            ? {
-                name: n.sent_by_name,
-                email: n.sent_by_email,
-              }
-            : null,
-        })),
-
-        fines: finesResult.rows.map((f) => ({
-          id: f.id,
-          amount: f.amount,
-          issuedAt: f.issued_at,
-          dueDate: f.due_date,
-          paidAt: f.paid_at,
-          status: f.status,
-          waived: f.waived,
-          waivedReason: f.waived_reason,
-          createdAt: f.created_at,
-          updatedAt: f.updated_at,
-        })),
-
-        disputes: disputesResult.rows.map((d) => ({
-          id: d.id,
-          reason: d.reason,
-          status: d.status,
-          submittedAt: d.submitted_at,
-          resolvedAt: d.resolved_at,
-          resolutionNotes: d.resolution_notes,
-          createdAt: d.created_at,
-          updatedAt: d.updated_at,
-          resolvedBy: d.resolved_by_name
-            ? {
-                name: d.resolved_by_name,
-                email: d.resolved_by_email,
-              }
-            : null,
-        })),
+        evidence_photos: evidencePhotosResult.rows,
+        notices: noticesResult.rows,
+        fines: finesResult.rows,
+        appeals: appealsResult.rows,
       };
 
-      return NextResponse.json({ violation });
+      return NextResponse.json({ violation: fullViolation }, { status: 200 });
     } finally {
       client.release();
     }
